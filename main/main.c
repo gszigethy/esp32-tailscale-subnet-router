@@ -131,11 +131,22 @@ void softap_set_dns_addr(esp_netif_t *esp_netif_ap, esp_netif_t *esp_netif_sta);
 static void dns_relay_state_cb(bool healthy)
 {
     (void)healthy;
-    esp_netif_t *ap  = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    /* Use the active uplink for the DNS source, not a hardcoded STA lookup.
+     * When ETH is the primary uplink and WiFi STA is not connected, looking
+     * up WIFI_STA_DEF would yield a netif with no DNS and cause
+     * softap_set_dns_addr to fall through to the 1.1.1.1 hardcoded
+     * fallback, hiding the router's upstream resolver from AP clients. */
+    esp_netif_t *uplink = NULL;
+#ifdef CONFIG_ETH_W5500_ENABLED
+    if (eth_uplink_connected())
+        uplink = esp_netif_get_handle_from_ifkey("ETH_DEF");
+#endif
+    if (!uplink)
+        uplink = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     ESP_LOGI(TAG_AP, "DNS relay state changed → healthy=%d — reapplying softap DNS",
              (int)healthy);
-    if (ap && sta) softap_set_dns_addr(ap, sta);
+    if (ap && uplink) softap_set_dns_addr(ap, uplink);
 }
 
 /* Multi-network rotation state. Index 0 is preferred; on association
@@ -432,18 +443,30 @@ static void eth_ip_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI("ETH", "Got IP:" IPSTR, IP2STR(&event->ip_info.ip));
         ap_connect = 1;
 
-        /* Only spawn the Tailscale task when it isn't already running.
-         * tailscale_connect() tears down and reinits if called again, but
-         * we prefer not to interrupt a working session just because the
-         * Ethernet DHCP renewed with the same IP on a new lease. */
-        if (tailscale_enabled && !tailscale_connected) {
+        /* Promote ETH to the default route now that it has a valid DHCP
+         * lease.  Doing this here (not at eth_uplink_init() time) guarantees
+         * lwIP's routing table already has an ETH entry when the preference
+         * is set, and avoids pointing the default route at an interface with
+         * no IP during the boot window when the cable may not be connected. */
+        esp_netif_t *eth = esp_netif_get_handle_from_ifkey("ETH_DEF");
+        if (eth) esp_netif_set_default_netif(eth);
+
+        /* Spawn or restart the Tailscale connect task.
+         * event->ip_changed is true on the first DHCP lease and on renewals
+         * that bring a different address; it is false on stable same-address
+         * renewals.  On ip_changed we restart unconditionally so the tunnel
+         * always sources from the wired interface even if a prior STA-based
+         * Tailscale session was already running.  tailscale_connect() handles
+         * teardown of any existing microlink instance internally. */
+        if (tailscale_enabled && event->ip_changed) {
+            tailscale_connected = false;
+            xTaskCreate(tailscale_connect_task, "ts_connect", 4096, NULL, 5, NULL);
+        } else if (tailscale_enabled && !tailscale_connected) {
             xTaskCreate(tailscale_connect_task, "ts_connect", 4096, NULL, 5, NULL);
         }
 
-        /* Copy the upstream (Ethernet) DNS into the AP-side DHCP options.
-         * softap_set_dns_addr accepts any uplink netif as its second arg. */
-        esp_netif_t *ap  = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-        esp_netif_t *eth = esp_netif_get_handle_from_ifkey("ETH_DEF");
+        /* Copy the upstream (Ethernet) DNS into the AP-side DHCP options. */
+        esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
         if (ap && eth) softap_set_dns_addr(ap, eth);
 
         /* Re-bind any portmap entries to the freshly-acquired Ethernet IP. */
@@ -880,22 +903,18 @@ void app_main(void)
      * has moved into the IP_EVENT_STA_GOT_IP handler so it still
      * runs whenever the uplink (re-)acquires an address. */
 
-    /* STA is the initial default route; Ethernet overrides this below
-     * when the W5500 is present. */
+    /* STA is the initial default route; eth_ip_event_handler promotes ETH
+     * to default once it acquires a DHCP lease, ensuring lwIP's routing
+     * table has a valid ETH route before the preference is changed. */
     esp_netif_set_default_netif(esp_netif_sta);
 
 #ifdef CONFIG_ETH_W5500_ENABLED
     /* W5500 Ethernet uplink — preferred over WiFi STA when present.
      * eth_uplink_init() returns NULL gracefully if the hardware is absent,
-     * leaving WiFi-only operation unchanged. */
+     * leaving WiFi-only operation unchanged.  Default-netif promotion is
+     * deferred to IP_EVENT_ETH_GOT_IP (see eth_ip_event_handler). */
     esp_netif_t *eth_netif = eth_uplink_init();
     if (eth_netif) {
-        /* Ethernet takes priority as default route so Tailscale and all
-         * outbound traffic go via the wired interface. WiFi STA remains
-         * connected as a fallback; the STA got-IP handler will only spawn
-         * the Tailscale task if Ethernet hasn't already done so. */
-        esp_netif_set_default_netif(eth_netif);
-
         ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
                         IP_EVENT_ETH_GOT_IP,
                         &eth_ip_event_handler,
