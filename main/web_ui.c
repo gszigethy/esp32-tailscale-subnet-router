@@ -65,6 +65,9 @@
 /* Globals owned by main.c — link status flags rendered in /api/status. */
 extern int ap_connect;
 extern int connect_count;
+extern volatile uint8_t eth_route_en;
+extern volatile uint8_t sta_route_en;
+extern volatile uint8_t ap_route_en;
 
 static const char *TAG = "web_ui";
 
@@ -310,6 +313,12 @@ static esp_err_t status_handler(httpd_req_t *req)
     }
     cJSON_AddNumberToObject(sta, "bytes_in",  (double)netif_hooks_get_sta_bytes_in());
     cJSON_AddNumberToObject(sta, "bytes_out", (double)netif_hooks_get_sta_bytes_out());
+    /* STA subnet routing toggle and last-detected CIDR. */
+    cJSON_AddBoolToObject(sta, "route_en", sta_route_en != 0);
+    char *sta_cidr_nv = nvs_param_get_str("sta_route_cidr");
+    if (sta_cidr_nv && sta_cidr_nv[0])
+        cJSON_AddStringToObject(sta, "route_cidr", sta_cidr_nv);
+    free(sta_cidr_nv);
     cJSON_AddItemToObject(root, "sta", sta);
 
     /* ETH (wired uplink) — connected, IP, mask, GW, CIDR, MAC. */
@@ -342,6 +351,12 @@ static esp_err_t status_handler(httpd_req_t *req)
                      eth_mac_bytes[3], eth_mac_bytes[4], eth_mac_bytes[5]);
             cJSON_AddStringToObject(eth, "mac", mac_str);
         }
+        /* Subnet routing toggle and last-detected CIDR for the Status card. */
+        cJSON_AddBoolToObject(eth, "route_en", eth_route_en != 0);
+        char *eth_cidr_nv = nvs_param_get_str("eth_route_cidr");
+        if (eth_cidr_nv && eth_cidr_nv[0])
+            cJSON_AddStringToObject(eth, "route_cidr", eth_cidr_nv);
+        free(eth_cidr_nv);
         cJSON_AddItemToObject(root, "eth", eth);
     }
 
@@ -368,6 +383,21 @@ static esp_err_t status_handler(httpd_req_t *req)
     }
     cJSON_AddNumberToObject(ap, "bytes_in",  (double)netif_hooks_get_ap_bytes_in());
     cJSON_AddNumberToObject(ap, "bytes_out", (double)netif_hooks_get_ap_bytes_out());
+    /* AP subnet routing toggle and computed CIDR (AP IP is static — no NVS cache). */
+    cJSON_AddBoolToObject(ap, "route_en", ap_route_en != 0);
+    if (ap_route_en && ap_if) {
+        esp_netif_ip_info_t ap_rt_ip = {0};
+        if (esp_netif_get_ip_info(ap_if, &ap_rt_ip) == ESP_OK && ap_rt_ip.ip.addr) {
+            uint32_t net = ap_rt_ip.ip.addr & ap_rt_ip.netmask.addr;
+            int ap_pfx2 = subnet_mask_prefix_len(ap_rt_ip.netmask.addr);
+            if (ap_pfx2 >= 0) {
+                char netbuf[16], cidrbuf[32];
+                ip4_to_str(net, netbuf, sizeof netbuf);
+                snprintf(cidrbuf, sizeof cidrbuf, "%s/%u", netbuf, (unsigned)ap_pfx2);
+                cJSON_AddStringToObject(ap, "route_cidr", cidrbuf);
+            }
+        }
+    }
     cJSON_AddItemToObject(root, "ap", ap);
 
     /* Radio-wide TX power (live, post-override). Same value for both
@@ -4419,6 +4449,195 @@ static const httpd_uri_t uri_sdlog_erase = {
     .uri = "/api/sdlog/erase", .method = HTTP_POST, .handler = sdlog_erase_handler,
 };
 
+/* POST /api/eth-routing — {"enabled": bool, "cidr": "192.168.1.0/24"}
+ *
+ * Saves eth_route_en to NVS.  When enabling, an optional "cidr" override
+ * stores a specific CIDR in NVS "eth_route_cidr"; if omitted the previously
+ * auto-detected value is kept.  Restarts Tailscale so tailscale_compose_routes()
+ * picks up the new flag at the next connect.  ts_routes (manual) is never
+ * modified here. */
+static esp_err_t eth_routing_handler(httpd_req_t *req)
+{
+    if (require_auth(req) != ESP_OK) return ESP_FAIL;
+
+    char *buf = malloc_body_buf(512);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    if (recv_body(req, buf, 512, NULL) != ESP_OK) { free(buf); return ESP_FAIL; }
+
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON");
+        return ESP_FAIL;
+    }
+
+    const cJSON *j_enabled = cJSON_GetObjectItem(root, "enabled");
+    const cJSON *j_cidr    = cJSON_GetObjectItem(root, "cidr");
+
+    if (cJSON_IsBool(j_enabled)) {
+        uint8_t en = cJSON_IsTrue(j_enabled) ? 1 : 0;
+        eth_route_en = en;
+        nvs_param_set_u8("eth_route_en", en);
+
+        /* Optional CIDR override — persists a custom CIDR in NVS. */
+        if (en && cJSON_IsString(j_cidr) && j_cidr->valuestring[0]) {
+            nvs_param_set_str("eth_route_cidr", j_cidr->valuestring);
+            ESP_LOGI(TAG, "eth-routing ON — CIDR override %s", j_cidr->valuestring);
+        } else {
+            ESP_LOGI(TAG, "eth-routing %s", en ? "ON" : "OFF");
+        }
+
+        /* Restart Tailscale so tailscale_compose_routes() sees the new flag. */
+        if (tailscale_enabled) {
+            tailscale_connected = false;
+            xTaskCreate(tailscale_connect_task, "ts_connect", 4096, NULL, 5, NULL);
+        }
+    }
+
+    cJSON_Delete(root);
+
+    /* Return the new state so the SPA can update without an extra poll. */
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "route_en", eth_route_en != 0);
+    char *eth_cidr_nv = nvs_param_get_str("eth_route_cidr");
+    if (eth_cidr_nv && eth_cidr_nv[0])
+        cJSON_AddStringToObject(resp, "route_cidr", eth_cidr_nv);
+    free(eth_cidr_nv);
+    char *s = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_sendstr(req, s ? s : "{}");
+    free(s);
+    return ret;
+}
+static const httpd_uri_t uri_eth_routing = {
+    .uri = "/api/eth-routing", .method = HTTP_POST, .handler = eth_routing_handler,
+};
+
+/* POST /api/sta-routing — toggle auto-advertisement of the WiFi STA subnet.
+ * Body: {"enabled": true|false}
+ * Mirrors /api/eth-routing for the WiFi uplink interface. */
+static esp_err_t sta_routing_handler(httpd_req_t *req)
+{
+    if (require_auth(req) != ESP_OK) return ESP_FAIL;
+    char *buf = malloc_body_buf(512);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    if (recv_body(req, buf, 512, NULL) != ESP_OK) { free(buf); return ESP_FAIL; }
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON"); return ESP_FAIL; }
+
+    const cJSON *j_enabled = cJSON_GetObjectItem(root, "enabled");
+    if (cJSON_IsBool(j_enabled)) {
+        uint8_t en = cJSON_IsTrue(j_enabled) ? 1 : 0;
+        sta_route_en = en;
+        nvs_param_set_u8("sta_route_en", en);
+        /* When enabling, populate sta_route_cidr from the live STA netif so
+         * tailscale_compose_routes() sees a valid CIDR on the very next
+         * Tailscale restart without waiting for the next DHCP event.
+         * Without this the key is empty (never written when sta_route_en=0
+         * at boot) and the first restart silently advertises no routes. */
+        if (en) {
+            esp_netif_t *sta_nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+            if (sta_nif) {
+                esp_netif_ip_info_t sinfo = {0};
+                if (esp_netif_get_ip_info(sta_nif, &sinfo) == ESP_OK && sinfo.ip.addr) {
+                    uint32_t net = sinfo.ip.addr & sinfo.netmask.addr;
+                    int pfx = subnet_mask_prefix_len(sinfo.netmask.addr);
+                    if (pfx >= 0) {
+                        char netbuf[16], cidrbuf[20];
+                        ip4_to_str(net, netbuf, sizeof netbuf);
+                        snprintf(cidrbuf, sizeof cidrbuf, "%s/%u", netbuf, (unsigned)pfx);
+                        nvs_param_set_str("sta_route_cidr", cidrbuf);
+                        ESP_LOGI(TAG, "sta-routing ON — CIDR %s", cidrbuf);
+                    } else {
+                        ESP_LOGI(TAG, "sta-routing ON — STA connected but CIDR deferred");
+                    }
+                } else {
+                    ESP_LOGI(TAG, "sta-routing ON — STA not connected yet, CIDR deferred to next DHCP");
+                }
+            }
+        } else {
+            ESP_LOGI(TAG, "sta-routing OFF");
+        }
+        if (tailscale_enabled) {
+            tailscale_connected = false;
+            xTaskCreate(tailscale_connect_task, "ts_connect", 4096, NULL, 5, NULL);
+        }
+    }
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "route_en", sta_route_en != 0);
+    char *sta_cidr_nv = nvs_param_get_str("sta_route_cidr");
+    if (sta_cidr_nv && sta_cidr_nv[0])
+        cJSON_AddStringToObject(resp, "route_cidr", sta_cidr_nv);
+    free(sta_cidr_nv);
+    char *s = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_sendstr(req, s ? s : "{}");
+    free(s);
+    return ret;
+}
+static const httpd_uri_t uri_sta_routing = {
+    .uri = "/api/sta-routing", .method = HTTP_POST, .handler = sta_routing_handler,
+};
+
+/* POST /api/ap-routing — toggle auto-advertisement of the WiFi AP subnet.
+ * Body: {"enabled": true|false}
+ * The AP CIDR is always computed live from the AP netif (no NVS cache needed
+ * because the AP IP is static and always available). */
+static esp_err_t ap_routing_handler(httpd_req_t *req)
+{
+    if (require_auth(req) != ESP_OK) return ESP_FAIL;
+    char *buf = malloc_body_buf(512);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    if (recv_body(req, buf, 512, NULL) != ESP_OK) { free(buf); return ESP_FAIL; }
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON"); return ESP_FAIL; }
+
+    const cJSON *j_enabled = cJSON_GetObjectItem(root, "enabled");
+    if (cJSON_IsBool(j_enabled)) {
+        uint8_t en = cJSON_IsTrue(j_enabled) ? 1 : 0;
+        ap_route_en = en;
+        nvs_param_set_u8("ap_route_en", en);
+        ESP_LOGI(TAG, "ap-routing %s", en ? "ON" : "OFF");
+        if (tailscale_enabled) {
+            tailscale_connected = false;
+            xTaskCreate(tailscale_connect_task, "ts_connect", 4096, NULL, 5, NULL);
+        }
+    }
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "route_en", ap_route_en != 0);
+    esp_netif_t *ap_nif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (ap_nif && ap_route_en) {
+        esp_netif_ip_info_t ap_info = {0};
+        if (esp_netif_get_ip_info(ap_nif, &ap_info) == ESP_OK && ap_info.ip.addr) {
+            uint32_t net = ap_info.ip.addr & ap_info.netmask.addr;
+            int pfx = subnet_mask_prefix_len(ap_info.netmask.addr);
+            if (pfx >= 0) {
+                char netbuf[16], cidrbuf[32];
+                ip4_to_str(net, netbuf, sizeof netbuf);
+                snprintf(cidrbuf, sizeof cidrbuf, "%s/%u", netbuf, (unsigned)pfx);
+                cJSON_AddStringToObject(resp, "route_cidr", cidrbuf);
+            }
+        }
+    }
+    char *s = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_sendstr(req, s ? s : "{}");
+    free(s);
+    return ret;
+}
+static const httpd_uri_t uri_ap_routing = {
+    .uri = "/api/ap-routing", .method = HTTP_POST, .handler = ap_routing_handler,
+};
+
 /* Wrapper with the URI-handler signature (no err code) so the same
  * redirect can be both a wildcard URI handler AND a 404 fallback.
  * Wildcard match avoids the "httpd_uri: URI ... not found" WARN
@@ -4448,7 +4667,7 @@ void web_ui_init(void)
      * instead of WebCrypto's ~100 ms. */
     httpd_config_t conf           = HTTPD_DEFAULT_CONFIG();
     conf.uri_match_fn             = httpd_uri_match_wildcard;
-    conf.max_uri_handlers         = 58;
+    conf.max_uri_handlers         = 60;
     conf.stack_size               = 12288;
     /* Without the mbedTLS context cost we can afford the bigger pool
      * the pre-HTTPS web server used. The SPA's first-paint opens 5-7
@@ -4515,6 +4734,9 @@ void web_ui_init(void)
     httpd_register_uri_handler(server, &uri_sdlog_download);
     httpd_register_uri_handler(server, &uri_sdlog_tail);
     httpd_register_uri_handler(server, &uri_sdlog_erase);
+    httpd_register_uri_handler(server, &uri_eth_routing);
+    httpd_register_uri_handler(server, &uri_sta_routing);
+    httpd_register_uri_handler(server, &uri_ap_routing);
     ESP_LOGI(TAG, "web UI listening on :%d (HTTP)", conf.server_port);
     /* HTTPS redirect server gone with HTTPS itself — direct HTTP-on-80
      * is now the only listener, so nothing to redirect anywhere. */

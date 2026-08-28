@@ -60,6 +60,27 @@ Up to **5** networks, tried in order. Per network:
 | **Accept peer subnet routes** | Install routes other nodes advertise. |
 | **LAN bypass when using an exit node** | RFC1918 destinations stay on the local LAN even with an exit node selected. |
 
+### Advertised routes — two tiers
+
+Routes advertised to the tailnet come from two independent sources, merged at connect time:
+
+1. **Manual routes** — the *Advertised subnet routes* textarea on the Tailscale tab. One CIDR per line. This field is the user's to manage; the firmware never modifies it.
+2. **Per-interface auto-routes** — opt-in toggles in the Status cards (see below). Each interface caches or computes its CIDR independently and merges it with the manual list. Duplicates are removed before the combined list is passed to microlink.
+
+### Status page — subnet routing toggles
+
+Each network interface on the Status dashboard has an **Auto-route** (or **Advertise AP**) row with a checkbox and **Save** button. Enabling it advertises that interface's subnet to the tailnet; disabling it removes it from the composed route list. Changes take effect on the next Tailscale reconnect (triggered automatically).
+
+| Interface | Default | Notes |
+|---|---|---|
+| **Ethernet (ETH)** | **On** (when ETH hardware present) | CIDR is cached on first DHCP lease and re-cached on address change. Zero-touch — no configuration needed on ETH-equipped hardware. |
+| **WiFi uplink (STA)** | **Off** | Opt-in; preserves original WiFi-only behaviour. Enabling immediately reads the live STA IP so the CIDR is ready for the next restart, without waiting for the next DHCP event. |
+| **Access Point (AP)** | **Off** | Opt-in. CIDR is always computed live from the static AP IP — no NVS cache. |
+
+> **These toggles are independent of the manual textarea.** Enabling STA or AP auto-routing adds that subnet *alongside* whatever is in the textarea — it never removes or replaces user-entered CIDRs.
+
+> **Approve the route in Tailscale admin.** Any newly advertised subnet (manual or auto) must be approved under Machines → *your device* → **Edit route settings** before tailnet peers can use it.
+
 ### Tunnel MTU
 
 `Auto (peer-aware)` is recommended — it derives the effective MTU/MSS

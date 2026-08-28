@@ -114,11 +114,19 @@ traffic you route through it.)*
 ## Features
 
 - **Dual role** — simultaneous WiFi STA (uplink) + AP (NAT router) +
-  Tailscale subnet router.
-- **Expose the upstream LAN too** — beyond its own AP subnet, an optional
-  Source-NAT (à la Tailscale `--snat-subnet-routes`) lets tailnet peers reach
-  the network the device is *connected to*, with no static route needed on the
-  upstream router.
+  Tailscale subnet router. When a W5500 SPI Ethernet adapter is connected it
+  becomes the uplink automatically; WiFi shifts to AP-only, freeing the radio
+  for IoT clients.
+- **Per-interface subnet routing** — three independent toggles on the Status
+  dashboard advertise each subnet to the tailnet separately:
+  - **ETH LAN** — auto-detected and zero-touch on ETH-equipped hardware.
+  - **WiFi STA** — opt-in (off by default, preserving original WiFi-only behaviour).
+  - **AP subnet** — opt-in, always computed live from the static AP IP.
+  All three are merged with the manual routes textarea at connect time;
+  the textarea is never overwritten by auto-detection.
+- **Expose the upstream LAN too** — an optional Source-NAT (à la Tailscale
+  `--snat-subnet-routes`) lets tailnet peers reach the network the device is
+  *connected to*, with no static route needed on the upstream router.
 - **Web UI for everything** — first-run password setup, WiFi join,
   tailnet enrolment, routes, firewall, diagnostics. Dark, responsive,
   single-page; served straight off the device.
@@ -154,6 +162,7 @@ traffic you route through it.)*
 | **Target** | ESP32-S3 with PSRAM (8 MB octal, 80 MHz) |
 | **Reference board** | ESP32-S3-DevKitC-1 **N16R8** (16 MB flash / 8 MB PSRAM) |
 | **Radio** | Single 2.4 GHz — STA and AP share one radio (see [limitations](#known-limitations)) |
+| **Ethernet (optional)** | W5500 SPI module — when present it auto-detects as the WAN uplink and WiFi becomes AP-only |
 | **Storage (optional)** | microSD for the log flight-recorder |
 | **Power** | USB-C; ~real-world draw of a small dev board |
 
@@ -271,6 +280,13 @@ next connect.
 <img src="docs/images/tailscale_v2.png" alt="Tailscale configuration and peers" width="88%">
 </div>
 
+> **Two ways to advertise subnets.** The *Advertised subnet routes* textarea on
+> the Tailscale tab is for routes you manage manually (one CIDR per line). In
+> addition, the **Status** dashboard has per-interface Auto-route toggles:
+> ETH LAN is on by default when ETH hardware is present; WiFi STA and AP subnet
+> are opt-in. All sources merge at connect time — the textarea is never
+> overwritten. See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for the full reference.
+
 > **Approve the route.** A newly advertised subnet shows up in the Tailscale
 > admin (Machines → your device → **Edit route settings**) and must be
 > **approved** before peers can use it. And if you later change the AP subnet,
@@ -278,8 +294,9 @@ next connect.
 > so the subnet silently becomes unreachable until you do.
 
 > **Reaching the *uplink* LAN (not just the AP subnet).** To expose the network
-> the device is connected to (its STA/uplink side), advertise that subnet too and
-> turn on **Source-NAT advertised routes**. That masquerades tunnel→LAN traffic to
+> the device is connected to (its STA/uplink side), enable the **STA auto-route**
+> toggle on the Status page (or add the subnet manually to the textarea) and turn
+> on **Source-NAT advertised routes**. That masquerades tunnel→LAN traffic to
 > the device's own uplink IP (Tailscale's `--snat-subnet-routes` default), so
 > upstream hosts can reply without a route back to the tailnet. Without it, the
 > upstream router would need a static route (`100.64.0.0/10 → this device`).

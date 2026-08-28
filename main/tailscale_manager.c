@@ -19,6 +19,8 @@
 #include "tailscale_config.h"
 #include "nvs_params.h"
 #include "esp_sntp.h"
+#include "esp_netif.h"
+#include "lwip/ip_addr.h"
 
 /* Local helper: load a string from NVS, defaulting to an empty heap
  * buffer when the key isn't there. Other modules assume non-NULL. */
@@ -156,6 +158,12 @@ esp_err_t tailscale_connect(void)
         s_microlink = NULL;
     }
 
+    /* Compose the full route advertisement: user manual ts_routes merged with
+     * any auto-detected per-interface CIDRs (ETH/STA/AP) that are enabled.
+     * The manual ts_routes textarea is never auto-modified; composition only
+     * adds auto CIDRs on top at connect time. */
+    char *composed = tailscale_compose_routes();
+
     microlink_config_t cfg = {
         .auth_key = tailscale_auth_key,
         .device_name = (tailscale_hostname && tailscale_hostname[0]) ? tailscale_hostname : NULL,
@@ -170,7 +178,7 @@ esp_err_t tailscale_connect(void)
         .stun_interval_ms = 0,
         .ctrl_watchdog_ms = 0,
         .ctrl_host = (tailscale_login_server && tailscale_login_server[0]) ? tailscale_login_server : NULL,
-        .advertise_routes = (tailscale_advertise_routes && tailscale_advertise_routes[0]) ? tailscale_advertise_routes : NULL,
+        .advertise_routes = (composed && composed[0]) ? composed : NULL,
         .netcheck_override_enabled = (tailscale_netcheck_override != 0),
         .netcheck_override_threshold_ms = (uint32_t)tailscale_netcheck_threshold_ms,
         .preferred_derp_region = (uint16_t)tailscale_default_derp_region,
@@ -179,6 +187,7 @@ esp_err_t tailscale_connect(void)
     s_microlink = microlink_init(&cfg);
     if (!s_microlink) {
         ESP_LOGE(TAG, "microlink_init failed");
+        free(composed);
         return ESP_FAIL;
     }
 
@@ -192,6 +201,7 @@ esp_err_t tailscale_connect(void)
         sdlog_set_microlink(NULL);   /* handle was set above; unset before free */
         microlink_destroy(s_microlink);
         s_microlink = NULL;
+        free(composed);
         return err;
     }
 
@@ -201,7 +211,110 @@ esp_err_t tailscale_connect(void)
              cfg.ctrl_host ? cfg.ctrl_host : "<saas>",
              (cfg.advertise_routes && cfg.advertise_routes[0]) ? cfg.advertise_routes : "<none>",
              cfg.max_peers);
+    free(composed);
     return ESP_OK;
+}
+
+/* Compose the full advertised-routes string from all sources and return it
+ * as a heap-allocated, newline-separated string.  Returns NULL when nothing
+ * is to be advertised.  Caller must free(). */
+char *tailscale_compose_routes(void)
+{
+#define CR_MAX    16   /* max total CIDRs (manual + auto) */
+#define CR_CIDR   20   /* "255.255.255.255/32\0" */
+    char cidrs[CR_MAX][CR_CIDR];
+    int  n = 0;
+
+    /* Helper: append a CIDR if non-empty and not already present. */
+    #define CR_ADD(s) do {                                          \
+        const char *_c = (s);                                       \
+        if (!_c || !_c[0] || n >= CR_MAX) break;                   \
+        bool _dup = false;                                          \
+        for (int _i = 0; _i < n; _i++) {                           \
+            if (strcmp(cidrs[_i], _c) == 0) { _dup = true; break; }\
+        }                                                           \
+        if (!_dup) strlcpy(cidrs[n++], _c, CR_CIDR);              \
+    } while (0)
+
+    /* 1. Parse user-managed manual routes (ts_routes). */
+    if (tailscale_advertise_routes && tailscale_advertise_routes[0]) {
+        const char *p = tailscale_advertise_routes;
+        while (*p && n < CR_MAX) {
+            while (*p == '\n' || *p == '\r' || *p == ' ' || *p == '\t') p++;
+            if (!*p) break;
+            const char *eol = p;
+            while (*eol && *eol != '\n' && *eol != '\r') eol++;
+            size_t len = (size_t)(eol - p);
+            while (len && (p[len-1] == ' ' || p[len-1] == '\t')) len--;
+            if (len > 0 && len < CR_CIDR) {
+                char tmp[CR_CIDR];
+                memcpy(tmp, p, len);
+                tmp[len] = '\0';
+                CR_ADD(tmp);
+            }
+            p = eol;
+        }
+    }
+
+    /* 2. ETH auto-route — enabled by default on ETH-equipped hardware. */
+    {
+        uint8_t en = 0;
+        nvs_param_get_u8("eth_route_en", &en);
+        if (en) {
+            char *cidr = nvs_param_get_str("eth_route_cidr");
+            if (cidr && cidr[0] && strlen(cidr) < CR_CIDR) CR_ADD(cidr);
+            free(cidr);
+        }
+    }
+
+    /* 3. WiFi STA auto-route — opt-in (default 0) for backward compat. */
+    {
+        uint8_t en = 0;
+        nvs_param_get_u8("sta_route_en", &en);
+        if (en) {
+            char *cidr = nvs_param_get_str("sta_route_cidr");
+            if (cidr && cidr[0] && strlen(cidr) < CR_CIDR) CR_ADD(cidr);
+            free(cidr);
+        }
+    }
+
+    /* 4. AP subnet auto-route — computed live from AP netif (static IP). */
+    {
+        uint8_t en = 0;
+        nvs_param_get_u8("ap_route_en", &en);
+        if (en) {
+            esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+            if (ap) {
+                esp_netif_ip_info_t info = {0};
+                if (esp_netif_get_ip_info(ap, &info) == ESP_OK && info.ip.addr) {
+                    uint32_t net_val = info.ip.addr & info.netmask.addr;
+                    int pfx = __builtin_popcount(info.netmask.addr);
+                    ip4_addr_t net_ip = { .addr = net_val };
+                    char ap_cidr[CR_CIDR];
+                    snprintf(ap_cidr, sizeof ap_cidr, IPSTR "/%d", IP2STR(&net_ip), pfx);
+                    CR_ADD(ap_cidr);
+                }
+            }
+        }
+    }
+
+    #undef CR_ADD
+    #undef CR_CIDR
+    #undef CR_MAX
+
+    if (n == 0) return NULL;
+
+    /* Join all CIDRs with newlines into a single heap string. */
+    size_t total = 0;
+    for (int i = 0; i < n; i++) total += strlen(cidrs[i]) + 1;
+    char *result = malloc(total);
+    if (!result) return NULL;
+    result[0] = '\0';
+    for (int i = 0; i < n; i++) {
+        if (i > 0) strlcat(result, "\n", total);
+        strlcat(result, cidrs[i], total);
+    }
+    return result;
 }
 
 void tailscale_disconnect(void)

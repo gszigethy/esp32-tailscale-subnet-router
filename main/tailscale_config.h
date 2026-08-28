@@ -61,6 +61,15 @@ void tailscale_connect_task(void *pvParameters);
 void tailscale_set_subnet(uint32_t ip, uint32_t mask);
 bool tailscale_in_subnet(uint32_t ip);
 
+// Compose the full advertised-routes string from all sources:
+//   1. ts_routes — user-managed manual routes (Tailscale config page textarea)
+//   2. eth_route_cidr — auto-detected Ethernet LAN CIDR (when eth_route_en=1 in NVS)
+//   3. sta_route_cidr — auto-detected WiFi STA CIDR (when sta_route_en=1 in NVS)
+//   4. AP subnet     — computed live from AP netif   (when ap_route_en=1 in NVS)
+// All sources are deduplicated. Returns a malloc'd newline-separated string,
+// or NULL when there is nothing to advertise. Caller must free().
+char *tailscale_compose_routes(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -6,6 +6,26 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- **W5500 SPI Ethernet uplink.** When a W5500 module is wired to the defined SPI pins and detected at boot, it automatically becomes the WAN uplink. WiFi shifts from STA+AP dual-role to AP-only, giving IoT clients a dedicated 2.4 GHz radio free of uplink contention. Tailscale and NAPT use the ETH interface transparently — no extra configuration needed.
+
+- **Per-interface subnet route advertisement.** Routes are now managed per interface and composed at Tailscale connect time, separately from the manual `ts_routes` textarea (which is never modified by auto-detection):
+  - **ETH LAN** — auto-detected on first DHCP lease; re-cached only when the address changes (`ip_changed=true`). Enabled by default (`eth_route_en=1`). Zero-touch on ETH-equipped hardware.
+  - **WiFi STA** — opt-in, off by default (`sta_route_en=0`) to preserve original WiFi-only behaviour. Toggle in Status → Uplink WiFi card. When enabled, the CIDR is populated immediately from the live netif so the next Tailscale restart doesn't wait for the next DHCP event.
+  - **AP subnet** — opt-in, off by default (`ap_route_en=0`). Toggle in Status → Access Point card. Always computed live from the AP netif (static IP), so no NVS cache is needed.
+  - All sources are deduplicated before being passed to microlink. The manual textarea remains the user's own; auto-routes appear alongside it, never inside it.
+
+### Fixed
+
+- **Auto-detected routes no longer overwrite user-managed manual routes.** The previous design wrote the ETH CIDR directly into `ts_routes` (the NVS key backing the web-UI textarea), destroying any routes the user had entered by hand and also breaking `maintain_ap_cidr_in_routes()`. Replaced by `tailscale_compose_routes()`, which merges all sources at connect time without ever writing to `ts_routes`.
+
+- **WiFi STA CIDR not populated when enabling auto-routing from the web UI.** When `sta_route_en=0` at boot, the DHCP event handler skips the CIDR cache write. If the user later enabled auto-routing via the Status card, `sta_route_cidr` was still empty, causing the next Tailscale restart to silently advertise no STA routes. The `/api/sta-routing` handler now reads the live STA netif IP immediately on enable and writes the CIDR to NVS.
+
+- **DNS relay task deadlock on boot.** The DNS relay state callback (`dns_relay_state_cb`) was registered before the default netif was set, causing a deadlock when the relay task interacted with the still-initialising lwIP DNS stack. Fixed by deferring relay initialisation until after the default netif is established.
+
+- **SNAT silently force-enabled on ETH detection.** The ETH IP event handler and `/api/eth-routing` handler were unconditionally setting `tailscale_snat_subnet_routes=1` in NVS whenever ETH routing was enabled. SNAT is a security-sensitive user choice; this hidden side-effect has been removed.
+
 ## [0.1.19] — 2026-08-15
 
 Stable release. Promotes the 0.1.19-beta1 DERP-liveness work to a stable

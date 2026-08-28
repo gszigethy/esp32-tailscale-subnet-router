@@ -119,10 +119,21 @@ static EventGroupHandle_t s_wifi_event_group;
 int ap_connect   = 0;
 int connect_count = 0;
 
+/* Per-interface subnet routing flags.
+ * eth_route_en: auto-advertise ETH LAN CIDR.  Default 1 — zero-touch on ETH hardware.
+ * sta_route_en: auto-advertise WiFi STA CIDR. Default 0 — opt-in, preserves original
+ *               WiFi-only behavior where routes are set manually via the Tailscale tab.
+ * ap_route_en:  advertise the AP subnet on the tailnet. Default 0 — opt-in. */
+volatile uint8_t eth_route_en = 1;
+volatile uint8_t sta_route_en = 0;
+volatile uint8_t ap_route_en  = 0;
+
 /* Forward declarations — definitions land further down in this file. */
 /* Non-static — also called from web_ui.c when DNS-relay state changes,
  * so the new DHCP-offered DNS takes effect immediately for new leases. */
 void softap_set_dns_addr(esp_netif_t *esp_netif_ap, esp_netif_t *esp_netif_sta);
+/* Used by both wifi_event_handler (STA got-IP) and eth_ip_event_handler. */
+static void cidr_from_dhcp_event(const ip_event_got_ip_t *ev, char *out, size_t out_size);
 
 /* Override the weak dns_relay_on_healthy hook so the moment the relay
  * task finishes its boot-delay + bind cycle, the DHCP-offered DNS
@@ -401,6 +412,21 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                 }
             }
         }
+        /* Cache the STA subnet CIDR so tailscale_compose_routes() can include
+         * it when sta_route_en=1.  Only on ip_changed to avoid NVS wear on
+         * stable same-address renewals.  The manual ts_routes textarea is
+         * unaffected — this only updates "sta_route_cidr". */
+        if (sta_route_en && event->ip_changed) {
+            char new_cidr[20];
+            cidr_from_dhcp_event(event, new_cidr, sizeof new_cidr);
+            char *old_cidr = nvs_param_get_str("sta_route_cidr");
+            if (!old_cidr || !old_cidr[0] || strcmp(old_cidr, new_cidr) != 0) {
+                ESP_LOGI(TAG_STA, "STA subnet %s — cached for tailnet route composition", new_cidr);
+                nvs_param_set_str("sta_route_cidr", new_cidr);
+            }
+            free(old_cidr);
+        }
+
         /* Auto-spawn the Tailscale connect task once STA has an IP.
          * Guard against double-spawn: if Ethernet already brought up the
          * tunnel, leave it running rather than tearing it down on a STA
@@ -423,6 +449,20 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
          * are cleared before the re-add. */
         portmap_install_all();
     }
+}
+
+/* Compute the network CIDR from a DHCP got-IP event.
+ * Works for any interface (ETH or STA) — the ip_event_got_ip_t struct is
+ * identical for IP_EVENT_ETH_GOT_IP and IP_EVENT_STA_GOT_IP.
+ * The netmask is in network byte order; __builtin_popcount derives the prefix
+ * length correctly regardless of byte order for contiguous masks. */
+static void cidr_from_dhcp_event(const ip_event_got_ip_t *ev,
+                                 char *out, size_t out_size)
+{
+    uint32_t net = ev->ip_info.ip.addr & ev->ip_info.netmask.addr;
+    int pfx = __builtin_popcount(ev->ip_info.netmask.addr);
+    ip4_addr_t n = { .addr = net };
+    snprintf(out, out_size, IPSTR "/%d", IP2STR(&n), pfx);
 }
 
 /* Ethernet uplink got-IP event handler.
@@ -450,6 +490,25 @@ static void eth_ip_event_handler(void *arg, esp_event_base_t event_base,
          * no IP during the boot window when the cable may not be connected. */
         esp_netif_t *eth = esp_netif_get_handle_from_ifkey("ETH_DEF");
         if (eth) esp_netif_set_default_netif(eth);
+
+        /* Cache ETH LAN CIDR for tailscale_compose_routes().
+         * Only on ip_changed (first lease or address change) so stable
+         * same-IP renewals never interrupt a live Tailscale session.
+         * NVS "eth_route_cidr" is read by tailscale_compose_routes() at
+         * connect time when eth_route_en=1; ts_routes (user manual) is
+         * never modified automatically. */
+        if (eth_route_en && event->ip_changed) {
+            char new_cidr[20];   /* "255.255.255.255/32\0" fits in 19 chars */
+            cidr_from_dhcp_event(event, new_cidr, sizeof new_cidr);
+            char *old_cidr = nvs_param_get_str("eth_route_cidr");
+            bool subnet_changed = !old_cidr || !old_cidr[0]
+                                  || strcmp(old_cidr, new_cidr) != 0;
+            free(old_cidr);
+            if (subnet_changed) {
+                ESP_LOGI("ETH", "ETH LAN subnet %s — cached for tailnet route composition", new_cidr);
+                nvs_param_set_str("eth_route_cidr", new_cidr);
+            }
+        }
 
         /* Spawn or restart the Tailscale connect task.
          * event->ip_changed is true on the first DHCP lease and on renewals
@@ -797,6 +856,25 @@ void app_main(void)
      * lives in tailscale_manager.c. Microlink lifecycle wires in later
      * once WiFi STA has an IP. */
     tailscale_init();
+
+    /* Per-interface subnet routing flags — loaded once at boot.
+     * eth_route_en defaults 1 (zero-touch on ETH hardware).
+     * sta_route_en and ap_route_en default 0 (opt-in for WiFi-only compat). */
+    {
+        uint8_t v = 1;
+        nvs_param_get_u8("eth_route_en", &v);
+        eth_route_en = v;
+    }
+    {
+        uint8_t v = 0;
+        nvs_param_get_u8("sta_route_en", &v);
+        sta_route_en = v;
+    }
+    {
+        uint8_t v = 0;
+        nvs_param_get_u8("ap_route_en", &v);
+        ap_route_en = v;
+    }
 
     /* MTU / MSS clamp / PMTU manager. Owns the wg netif MTU plus the AP
      * hook clamp values. Loads NVS now; the 30 s poll timer takes over

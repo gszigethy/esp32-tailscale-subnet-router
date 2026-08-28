@@ -1598,6 +1598,24 @@
             <span class="stat-label">MAC</span>
             <span class="stat-value mono" id="eth-mac">—</span>
           </div>
+          <div class="stat-row">
+            <span class="stat-label">Subnet routing</span>
+            <span class="stat-value flex items-center gap-2">
+              <span class="badge badge-neutral" id="eth-route-badge">—</span>
+              <span class="mono" id="eth-route-cidr" style="font-size:0.85rem;"></span>
+            </span>
+          </div>
+          <div class="stat-row" style="padding-top:0.5rem; border-top:1px solid var(--border);">
+            <span class="stat-label" style="align-self:center;">Auto-route</span>
+            <span class="stat-value flex items-center gap-2">
+              <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer; margin:0;">
+                <input type="checkbox" id="eth-route-en-toggle">
+                <span id="eth-route-en-label" style="font-size:0.85rem;">Enable</span>
+              </label>
+              <button class="btn btn-sm btn-primary" id="eth-route-save" style="padding:0.2rem 0.6rem; font-size:0.8rem;">Save</button>
+              <span id="eth-route-status" style="font-size:0.8rem; color:var(--success); display:none;">Saved</span>
+            </span>
+          </div>
         </div>
       </div>
 
@@ -1656,6 +1674,24 @@
               <span class="stat-label">Traffic</span>
               <span class="stat-value mono" id="uplink-traffic">—</span>
             </div>
+            <div class="stat-row">
+              <span class="stat-label">Subnet routing</span>
+              <span class="stat-value flex items-center gap-2">
+                <span class="badge badge-neutral" id="sta-route-badge">—</span>
+                <span class="mono" id="sta-route-cidr" style="font-size:0.85rem;"></span>
+              </span>
+            </div>
+            <div class="stat-row" style="padding-top:0.5rem; border-top:1px solid var(--border);">
+              <span class="stat-label" style="align-self:center;">Auto-route</span>
+              <span class="stat-value flex items-center gap-2">
+                <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer; margin:0;">
+                  <input type="checkbox" id="sta-route-en-toggle">
+                  <span id="sta-route-en-label" style="font-size:0.85rem;">Enable</span>
+                </label>
+                <button class="btn btn-sm btn-primary" id="sta-route-save" style="padding:0.2rem 0.6rem; font-size:0.8rem;">Save</button>
+                <span id="sta-route-status" style="font-size:0.8rem; color:var(--success); display:none;">Saved</span>
+              </span>
+            </div>
           </div>
         </div>
 
@@ -1696,6 +1732,24 @@
             <div class="stat-row">
               <span class="stat-label">Traffic</span>
               <span class="stat-value mono" id="ap-traffic">—</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label">Subnet routing</span>
+              <span class="stat-value flex items-center gap-2">
+                <span class="badge badge-neutral" id="ap-route-badge">—</span>
+                <span class="mono" id="ap-route-cidr" style="font-size:0.85rem;"></span>
+              </span>
+            </div>
+            <div class="stat-row" style="padding-top:0.5rem; border-top:1px solid var(--border);">
+              <span class="stat-label" style="align-self:center;">Advertise AP</span>
+              <span class="stat-value flex items-center gap-2">
+                <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer; margin:0;">
+                  <input type="checkbox" id="ap-route-en-toggle">
+                  <span id="ap-route-en-label" style="font-size:0.85rem;">Enable</span>
+                </label>
+                <button class="btn btn-sm btn-primary" id="ap-route-save" style="padding:0.2rem 0.6rem; font-size:0.8rem;">Save</button>
+                <span id="ap-route-status" style="font-size:0.8rem; color:var(--success); display:none;">Saved</span>
+              </span>
             </div>
           </div>
         </div>
@@ -3296,6 +3350,25 @@
         overall.innerHTML = '<span class="badge-dot"></span> Degraded';
       }
 
+      // STA subnet routing state
+      var staRouteBadge  = document.getElementById('sta-route-badge');
+      var staRouteCidrEl = document.getElementById('sta-route-cidr');
+      var staRouteToggle = document.getElementById('sta-route-en-toggle');
+      if (staRouteBadge) {
+        if (ul.route_en) {
+          staRouteBadge.className = 'badge badge-success';
+          staRouteBadge.textContent = 'On';
+          if (staRouteCidrEl) staRouteCidrEl.textContent = ul.route_cidr || '(detecting…)';
+        } else {
+          staRouteBadge.className = 'badge badge-neutral';
+          staRouteBadge.textContent = 'Off';
+          if (staRouteCidrEl) staRouteCidrEl.textContent = '';
+        }
+        if (staRouteToggle && !staRouteToggle._touched) {
+          staRouteToggle.checked = !!ul.route_en;
+        }
+      }
+
       // ETH (wired uplink)
       var eth = data.eth || {};
       var ethCard = document.getElementById('card-eth');
@@ -3314,6 +3387,24 @@
           ethBadge.textContent = 'Disconnected';
           ethCard.className = 'card card-stripe-neutral mb-4';
         }
+
+        // Subnet routing state
+        var routeBadge = document.getElementById('eth-route-badge');
+        var routeCidrEl = document.getElementById('eth-route-cidr');
+        var routeToggle = document.getElementById('eth-route-en-toggle');
+        if (eth.route_en) {
+          routeBadge.className = 'badge badge-success';
+          routeBadge.textContent = 'On';
+          routeCidrEl.textContent = eth.route_cidr || '(detecting…)';
+        } else {
+          routeBadge.className = 'badge badge-neutral';
+          routeBadge.textContent = 'Off';
+          routeCidrEl.textContent = '';
+        }
+        // Only set toggle on first load to avoid fighting the user mid-edit
+        if (routeToggle && !routeToggle._touched) {
+          routeToggle.checked = !!eth.route_en;
+        }
       }
 
       // AP
@@ -3329,6 +3420,25 @@
       var apClientsBadge = document.getElementById('ap-clients-badge');
       apClientsBadge.textContent = (ap.clients != null ? ap.clients + ' client' + (ap.clients !== 1 ? 's' : '') : '—');
       apClientsBadge.className = (typeof ap.clients === 'number' && ap.clients > 0) ? 'badge badge-success' : 'badge badge-neutral';
+
+      // AP subnet routing state
+      var apRouteBadge  = document.getElementById('ap-route-badge');
+      var apRouteCidrEl = document.getElementById('ap-route-cidr');
+      var apRouteToggle = document.getElementById('ap-route-en-toggle');
+      if (apRouteBadge) {
+        if (ap.route_en) {
+          apRouteBadge.className = 'badge badge-success';
+          apRouteBadge.textContent = 'On';
+          if (apRouteCidrEl) apRouteCidrEl.textContent = ap.route_cidr || '(detecting…)';
+        } else {
+          apRouteBadge.className = 'badge badge-neutral';
+          apRouteBadge.textContent = 'Off';
+          if (apRouteCidrEl) apRouteCidrEl.textContent = '';
+        }
+        if (apRouteToggle && !apRouteToggle._touched) {
+          apRouteToggle.checked = !!ap.route_en;
+        }
+      }
 
       /* System tile — internal DRAM + SPIRAM bars, CPU load %, CPU temp.
        * Backend reports mem_internal_free/total, mem_spiram_free/total,
@@ -5640,6 +5750,118 @@
           showToast('error', 'Save failed', e && e.message ? e.message : 'unknown error', 6000);
         });
     });
+
+    // ETH subnet routing toggle — Status card Save button
+    (function () {
+      var toggle = document.getElementById('eth-route-en-toggle');
+      var saveBtn = document.getElementById('eth-route-save');
+      var statusEl = document.getElementById('eth-route-status');
+      if (!toggle || !saveBtn) return;
+
+      // Mark touched so applyStatus() stops overwriting the checkbox
+      toggle.addEventListener('change', function () { toggle._touched = true; });
+
+      saveBtn.addEventListener('click', function () {
+        var enabled = toggle.checked;
+        saveBtn.disabled = true;
+        saveBtn.textContent = '…';
+        apiFetch('/api/eth-routing', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ enabled: enabled })
+        })
+          .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+          .then(function (resp) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            toggle._touched = false;   // allow next status poll to sync
+            // Update badge immediately from the response
+            var rb = document.getElementById('eth-route-badge');
+            var rc = document.getElementById('eth-route-cidr');
+            if (rb) { rb.className = resp.route_en ? 'badge badge-success' : 'badge badge-neutral'; rb.textContent = resp.route_en ? 'On' : 'Off'; }
+            if (rc) rc.textContent = resp.route_en ? (resp.route_cidr || '(detecting…)') : '';
+            if (statusEl) { statusEl.style.display = 'inline'; setTimeout(function () { statusEl.style.display = 'none'; }, 2500); }
+            showToast('success', 'Saved', 'Ethernet subnet routing ' + (enabled ? 'enabled' : 'disabled') + '.', 4000);
+          })
+          .catch(function (e) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            showToast('error', 'Save failed', e && e.message ? e.message : 'unknown error', 6000);
+          });
+      });
+    })();
+
+    // STA subnet routing toggle — Status card Save button
+    (function () {
+      var toggle = document.getElementById('sta-route-en-toggle');
+      var saveBtn = document.getElementById('sta-route-save');
+      var statusEl = document.getElementById('sta-route-status');
+      if (!toggle || !saveBtn) return;
+      toggle.addEventListener('change', function () { toggle._touched = true; });
+      saveBtn.addEventListener('click', function () {
+        var enabled = toggle.checked;
+        saveBtn.disabled = true;
+        saveBtn.textContent = '…';
+        apiFetch('/api/sta-routing', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ enabled: enabled })
+        })
+          .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+          .then(function (resp) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            toggle._touched = false;
+            var rb = document.getElementById('sta-route-badge');
+            var rc = document.getElementById('sta-route-cidr');
+            if (rb) { rb.className = resp.route_en ? 'badge badge-success' : 'badge badge-neutral'; rb.textContent = resp.route_en ? 'On' : 'Off'; }
+            if (rc) rc.textContent = resp.route_en ? (resp.route_cidr || '(detecting…)') : '';
+            if (statusEl) { statusEl.style.display = 'inline'; setTimeout(function () { statusEl.style.display = 'none'; }, 2500); }
+            showToast('success', 'Saved', 'WiFi STA subnet routing ' + (enabled ? 'enabled' : 'disabled') + '.', 4000);
+          })
+          .catch(function (e) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            showToast('error', 'Save failed', e && e.message ? e.message : 'unknown error', 6000);
+          });
+      });
+    })();
+
+    // AP subnet routing toggle — Status card Save button
+    (function () {
+      var toggle = document.getElementById('ap-route-en-toggle');
+      var saveBtn = document.getElementById('ap-route-save');
+      var statusEl = document.getElementById('ap-route-status');
+      if (!toggle || !saveBtn) return;
+      toggle.addEventListener('change', function () { toggle._touched = true; });
+      saveBtn.addEventListener('click', function () {
+        var enabled = toggle.checked;
+        saveBtn.disabled = true;
+        saveBtn.textContent = '…';
+        apiFetch('/api/ap-routing', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ enabled: enabled })
+        })
+          .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+          .then(function (resp) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            toggle._touched = false;
+            var rb = document.getElementById('ap-route-badge');
+            var rc = document.getElementById('ap-route-cidr');
+            if (rb) { rb.className = resp.route_en ? 'badge badge-success' : 'badge badge-neutral'; rb.textContent = resp.route_en ? 'On' : 'Off'; }
+            if (rc) rc.textContent = resp.route_en ? (resp.route_cidr || '(detecting…)') : '';
+            if (statusEl) { statusEl.style.display = 'inline'; setTimeout(function () { statusEl.style.display = 'none'; }, 2500); }
+            showToast('success', 'Saved', 'AP subnet routing ' + (enabled ? 'enabled' : 'disabled') + '.', 4000);
+          })
+          .catch(function (e) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            showToast('error', 'Save failed', e && e.message ? e.message : 'unknown error', 6000);
+          });
+      });
+    })();
 
     // =====================================================================
     // FIREWALL PAGE
