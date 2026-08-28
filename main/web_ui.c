@@ -20,6 +20,7 @@
 #include "cJSON.h"
 #include "lwip/ip4_addr.h"
 #include "web_ui.h"
+#include "eth_uplink.h"
 #include "tailscale_config.h"
 #include "tailscale_mtu.h"
 #include "nvs_params.h"
@@ -310,6 +311,39 @@ static esp_err_t status_handler(httpd_req_t *req)
     cJSON_AddNumberToObject(sta, "bytes_in",  (double)netif_hooks_get_sta_bytes_in());
     cJSON_AddNumberToObject(sta, "bytes_out", (double)netif_hooks_get_sta_bytes_out());
     cJSON_AddItemToObject(root, "sta", sta);
+
+    /* ETH (wired uplink) — connected, IP, mask, GW, CIDR, MAC. */
+    {
+        cJSON *eth = cJSON_CreateObject();
+        bool eth_conn = eth_uplink_connected();
+        cJSON_AddBoolToObject(eth, "connected", eth_conn);
+        if (eth_conn) {
+            uint32_t eth_ip, eth_mask, eth_gw;
+            if (eth_uplink_get_ip_info(&eth_ip, &eth_mask, &eth_gw)) {
+                char buf[16];
+                ip4_to_str(eth_ip, buf, sizeof buf);
+                cJSON_AddStringToObject(eth, "ip", buf);
+                ip4_to_str(eth_gw, buf, sizeof buf);
+                cJSON_AddStringToObject(eth, "gateway", buf);
+                int eth_pfx = subnet_mask_prefix_len(eth_mask);
+                if (eth_pfx >= 0) {
+                    cJSON_AddNumberToObject(eth, "prefix", eth_pfx);
+                    char netbuf[16], cidrbuf[32];
+                    ip4_to_str(eth_ip & eth_mask, netbuf, sizeof netbuf);
+                    snprintf(cidrbuf, sizeof cidrbuf, "%s/%u", netbuf, (unsigned)eth_pfx);
+                    cJSON_AddStringToObject(eth, "cidr", cidrbuf);
+                }
+            }
+            uint8_t eth_mac_bytes[6];
+            eth_uplink_get_mac(eth_mac_bytes);
+            snprintf(mac_str, sizeof mac_str,
+                     "%02x:%02x:%02x:%02x:%02x:%02x",
+                     eth_mac_bytes[0], eth_mac_bytes[1], eth_mac_bytes[2],
+                     eth_mac_bytes[3], eth_mac_bytes[4], eth_mac_bytes[5]);
+            cJSON_AddStringToObject(eth, "mac", mac_str);
+        }
+        cJSON_AddItemToObject(root, "eth", eth);
+    }
 
     /* AP (downlink) — SSID + channel from live wifi_config, MAC, clients, IP. */
     cJSON *ap = cJSON_CreateObject();

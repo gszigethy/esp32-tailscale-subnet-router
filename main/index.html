@@ -1566,6 +1566,41 @@
         <span style="color:var(--warning); font-weight:var(--weight-semibold);">View →</span>
       </div>
 
+      <!-- Ethernet uplink card (full-width) -->
+      <div class="card card-stripe-neutral mb-4" id="card-eth">
+        <div class="card-header">
+          <div class="card-header-left">
+            <span class="card-header-icon">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="8" width="8" height="8" rx="1"/>
+                <rect x="14" y="8" width="8" height="8" rx="1"/>
+                <line x1="10" y1="12" x2="14" y2="12"/>
+              </svg>
+            </span>
+            <span class="card-title">Ethernet Uplink</span>
+          </div>
+          <span class="badge badge-neutral" id="eth-status-badge">—</span>
+        </div>
+        <div class="stat-list">
+          <div class="stat-row">
+            <span class="stat-label">IP Address</span>
+            <span class="stat-value mono" id="eth-ip">—</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Gateway</span>
+            <span class="stat-value mono" id="eth-gateway">—</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Subnet CIDR</span>
+            <span class="stat-value mono" id="eth-cidr">—</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">MAC</span>
+            <span class="stat-value mono" id="eth-mac">—</span>
+          </div>
+        </div>
+      </div>
+
       <!-- Row 1: Uplink + AP (side by side on tablet+) -->
       <div class="grid grid-cols-2 mb-4">
 
@@ -3259,6 +3294,26 @@
         document.getElementById('card-uplink').className = 'card card-stripe-danger';
         overall.className = 'badge badge-warning';
         overall.innerHTML = '<span class="badge-dot"></span> Degraded';
+      }
+
+      // ETH (wired uplink)
+      var eth = data.eth || {};
+      var ethCard = document.getElementById('card-eth');
+      if (ethCard) {
+        document.getElementById('eth-ip').textContent      = eth.ip ? (eth.ip + (eth.prefix != null ? '/' + eth.prefix : '')) : '—';
+        document.getElementById('eth-gateway').textContent = eth.gateway || '—';
+        document.getElementById('eth-cidr').textContent    = eth.cidr    || '—';
+        document.getElementById('eth-mac').textContent     = eth.mac     || '—';
+        var ethBadge = document.getElementById('eth-status-badge');
+        if (eth.connected) {
+          ethBadge.className = 'badge badge-success';
+          ethBadge.textContent = 'Connected';
+          ethCard.className = 'card card-stripe-success mb-4';
+        } else {
+          ethBadge.className = 'badge badge-neutral';
+          ethBadge.textContent = 'Disconnected';
+          ethCard.className = 'card card-stripe-neutral mb-4';
+        }
       }
 
       // AP

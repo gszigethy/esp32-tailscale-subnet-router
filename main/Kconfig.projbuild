@@ -1,3 +1,71 @@
+menu "W5500 Ethernet Uplink"
+
+    config ETH_W5500_ENABLED
+        bool "Enable W5500 Ethernet uplink"
+        default y
+        help
+            Enable the WIZnet W5500 SPI Ethernet driver as the primary internet
+            uplink. When present, Ethernet is preferred over WiFi STA as the
+            default route. The firmware falls back to WiFi-only if the W5500 is
+            not detected at boot.
+
+    config ETH_W5500_CS_GPIO
+        int "W5500 CS (chip select) GPIO"
+        default 1
+        depends on ETH_W5500_ENABLED
+        help
+            SPI chip-select pin. XIAO W5500 adapter default: GPIO1 (D1).
+
+    config ETH_W5500_SCK_GPIO
+        int "W5500 SCK GPIO"
+        default 8
+        depends on ETH_W5500_ENABLED
+        help
+            SPI clock pin. XIAO W5500 adapter default: GPIO8 (D8/SCK).
+
+    config ETH_W5500_MISO_GPIO
+        int "W5500 MISO GPIO"
+        default 9
+        depends on ETH_W5500_ENABLED
+        help
+            SPI MISO pin. XIAO W5500 adapter default: GPIO9 (D9/MISO).
+
+    config ETH_W5500_MOSI_GPIO
+        int "W5500 MOSI GPIO"
+        default 10
+        depends on ETH_W5500_ENABLED
+        help
+            SPI MOSI pin. XIAO W5500 adapter default: GPIO10 (D10/MOSI).
+
+    config ETH_W5500_INT_GPIO
+        int "W5500 INT GPIO (-1 = polling)"
+        default -1
+        depends on ETH_W5500_ENABLED
+        help
+            Interrupt GPIO for receive notification. -1 uses 100 ms polling
+            instead, which is reliable and avoids wiring an extra pin.
+            XIAO W5500 adapter exposes this on GPIO16 (D16) if you want it.
+
+    config ETH_W5500_SPI_HOST
+        int "SPI host (1 = SPI2_HOST, 2 = SPI3_HOST)"
+        default 1
+        depends on ETH_W5500_ENABLED
+        help
+            SPI peripheral to use. GPIO8/9/10 are the SPI2 pins on ESP32-S3,
+            so 1 (SPI2_HOST) is correct for the XIAO W5500 adapter.
+
+    config ETH_W5500_SPI_CLOCK_MHZ
+        int "W5500 SPI clock speed (MHz)"
+        range 1 40
+        default 20
+        depends on ETH_W5500_ENABLED
+        help
+            SPI clock for the W5500. 20 MHz is conservative and reliable;
+            the chip supports up to 80 MHz but cable length and board layout
+            limit practical speeds. Raise to 40 MHz if throughput matters.
+
+endmenu
+
 menu "Example Configuration"
 
     menu "SoftAP Configuration"

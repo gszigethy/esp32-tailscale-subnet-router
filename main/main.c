@@ -52,6 +52,7 @@
 #include "wifi_networks.h"
 #include "dhcp_reservations.h"
 #include "portmap.h"
+#include "eth_uplink.h"
 #include "mac_deny.h"
 #include "reset_history.h"
 #include "ota.h"
@@ -389,11 +390,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                 }
             }
         }
-        /* Auto-spawn the Tailscale (microlink) connect task once STA has
-         * an IP — same trigger point as the old repo. The task is
-         * responsible for waiting on SNTP, dialing the control plane and
-         * staying online; we just kick it off here. */
-        if (tailscale_enabled) {
+        /* Auto-spawn the Tailscale connect task once STA has an IP.
+         * Guard against double-spawn: if Ethernet already brought up the
+         * tunnel, leave it running rather than tearing it down on a STA
+         * DHCP renewal or roam event. */
+        if (tailscale_enabled && !tailscale_connected) {
             xTaskCreate(tailscale_connect_task, "ts_connect", 4096, NULL, 5, NULL);
         }
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
@@ -410,6 +411,47 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
          * STA IP. portmap_install_all is idempotent — duplicate bindings
          * are cleared before the re-add. */
         portmap_install_all();
+    }
+}
+
+/* Ethernet uplink got-IP event handler.
+ *
+ * Mirrors IP_EVENT_STA_GOT_IP: marks the uplink as up, spawns the Tailscale
+ * connect task (if not already running), copies the DHCP-learned DNS into the
+ * AP-side DHCP server, and re-binds portmap rules to the new IP.
+ *
+ * No channel-realign logic here — that single-radio constraint is WiFi-only.
+ */
+static void eth_ip_event_handler(void *arg, esp_event_base_t event_base,
+                                  int32_t event_id, void *event_data)
+{
+    if (event_base != IP_EVENT) return;
+
+    if (event_id == IP_EVENT_ETH_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI("ETH", "Got IP:" IPSTR, IP2STR(&event->ip_info.ip));
+        ap_connect = 1;
+
+        /* Only spawn the Tailscale task when it isn't already running.
+         * tailscale_connect() tears down and reinits if called again, but
+         * we prefer not to interrupt a working session just because the
+         * Ethernet DHCP renewed with the same IP on a new lease. */
+        if (tailscale_enabled && !tailscale_connected) {
+            xTaskCreate(tailscale_connect_task, "ts_connect", 4096, NULL, 5, NULL);
+        }
+
+        /* Copy the upstream (Ethernet) DNS into the AP-side DHCP options.
+         * softap_set_dns_addr accepts any uplink netif as its second arg. */
+        esp_netif_t *ap  = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+        esp_netif_t *eth = esp_netif_get_handle_from_ifkey("ETH_DEF");
+        if (ap && eth) softap_set_dns_addr(ap, eth);
+
+        /* Re-bind any portmap entries to the freshly-acquired Ethernet IP. */
+        portmap_install_all();
+
+    } else if (event_id == IP_EVENT_ETH_LOST_IP) {
+        ESP_LOGI("ETH", "Lost IP — uplink down");
+        ap_connect = 0;
     }
 }
 
@@ -838,9 +880,32 @@ void app_main(void)
      * has moved into the IP_EVENT_STA_GOT_IP handler so it still
      * runs whenever the uplink (re-)acquires an address. */
 
-    /* STA is still the preferred default route for outgoing traffic
-     * once it has an address; before that, the AP netif stays default. */
+    /* STA is the initial default route; Ethernet overrides this below
+     * when the W5500 is present. */
     esp_netif_set_default_netif(esp_netif_sta);
+
+#ifdef CONFIG_ETH_W5500_ENABLED
+    /* W5500 Ethernet uplink — preferred over WiFi STA when present.
+     * eth_uplink_init() returns NULL gracefully if the hardware is absent,
+     * leaving WiFi-only operation unchanged. */
+    esp_netif_t *eth_netif = eth_uplink_init();
+    if (eth_netif) {
+        /* Ethernet takes priority as default route so Tailscale and all
+         * outbound traffic go via the wired interface. WiFi STA remains
+         * connected as a fallback; the STA got-IP handler will only spawn
+         * the Tailscale task if Ethernet hasn't already done so. */
+        esp_netif_set_default_netif(eth_netif);
+
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                        IP_EVENT_ETH_GOT_IP,
+                        &eth_ip_event_handler,
+                        NULL, NULL));
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                        IP_EVENT_ETH_LOST_IP,
+                        &eth_ip_event_handler,
+                        NULL, NULL));
+    }
+#endif
 
     /* Enable napt on the AP netif */
     if (esp_netif_napt_enable(esp_netif_ap) != ESP_OK) {

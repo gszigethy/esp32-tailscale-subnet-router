@@ -46,6 +46,7 @@ idf_component_register(SRCS "main.c"
                             "mac_deny.c"
                             "reset_history.c"
                             "ota.c"
+                            "eth_uplink.c"
                             "index_html_data.c"
                     PRIV_REQUIRES esp_wifi nvs_flash esp_event esp_netif esp_timer
                                   lwip microlink wpa_supplicant
@@ -55,6 +56,7 @@ idf_component_register(SRCS "main.c"
                                   web_password net_diag dhcpserver
                                   espcoredump dns_relay cli
                                   app_update esp_https_ota
+                                  esp_eth driver
                     INCLUDE_DIRS ".")
 
 # Phase 1.9k: wrap ip_napt_forward to skip NAPT for tailnet CGNAT
