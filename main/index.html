@@ -1600,6 +1600,10 @@
             <span class="stat-value mono" id="eth-cidr">—</span>
           </div>
           <div class="stat-row">
+            <span class="stat-label">DNS</span>
+            <span class="stat-value mono" id="eth-dns">—</span>
+          </div>
+          <div class="stat-row">
             <span class="stat-label">MAC</span>
             <span class="stat-value mono" id="eth-mac">—</span>
           </div>
@@ -3417,6 +3421,7 @@
         document.getElementById('eth-ip').textContent      = eth.ip ? (eth.ip + (eth.prefix != null ? '/' + eth.prefix : '')) : '—';
         document.getElementById('eth-gateway').textContent = eth.gateway || '—';
         document.getElementById('eth-cidr').textContent    = eth.cidr    || '—';
+        document.getElementById('eth-dns').textContent     = eth.dns     || '—';
         document.getElementById('eth-mac').textContent     = eth.mac     || '—';
         document.getElementById('eth-traffic').textContent = formatTraffic(eth.bytes_in, eth.bytes_out);
         var ethBadge = document.getElementById('eth-status-badge');

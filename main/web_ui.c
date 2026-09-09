@@ -359,6 +359,21 @@ static esp_err_t status_handler(httpd_req_t *req)
                      eth_mac_bytes[0], eth_mac_bytes[1], eth_mac_bytes[2],
                      eth_mac_bytes[3], eth_mac_bytes[4], eth_mac_bytes[5]);
             cJSON_AddStringToObject(eth, "mac", mac_str);
+
+            /* DNS — mirrors the STA block above. eth_uplink.c only tracks
+             * IP/mask/GW itself, not DNS, so read it straight off the ETH
+             * netif the same way STA does; this was simply missing before,
+             * which is why the ETH card never showed a resolver at all. */
+            esp_netif_t *eth_if = esp_netif_get_handle_from_ifkey("ETH_DEF");
+            if (eth_if) {
+                esp_netif_dns_info_t eth_dns = {0};
+                if (esp_netif_get_dns_info(eth_if, ESP_NETIF_DNS_MAIN, &eth_dns) == ESP_OK
+                    && eth_dns.ip.u_addr.ip4.addr) {
+                    char dbuf[16];
+                    ip4_to_str(eth_dns.ip.u_addr.ip4.addr, dbuf, sizeof dbuf);
+                    cJSON_AddStringToObject(eth, "dns", dbuf);
+                }
+            }
         }
         /* Wire-byte counters — reported unconditionally (not only while
          * connected) so a link that has since dropped still shows what it
