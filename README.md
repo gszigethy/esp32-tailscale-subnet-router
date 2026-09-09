@@ -139,7 +139,8 @@ traffic you route through it.)*
   silently leaking to the local uplink.
 - **Stateful-ish ACL firewall** — four hook points (Internet↔ESP,
   Clients↔ESP) with first-match-wins rules by protocol / CIDR / port /
-  action, plus per-rule hit counters.
+  action, plus per-rule hit counters. The Internet-side chains cover
+  **both** uplinks, wired Ethernet and WiFi STA alike.
 - **DNS forwarder with cache** — on-board resolver for AP clients with a
   PSRAM-backed response cache and configurable upstream.
 - **Operations toolbox** — on-device ping / traceroute / route-explain,

@@ -16,6 +16,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   - **AP subnet** — opt-in, off by default (`ap_route_en=0`). Toggle in Status → Access Point card. Always computed live from the AP netif (static IP), so no NVS cache is needed.
   - All sources are deduplicated before being passed to microlink. The manual textarea remains the user's own; auto-routes appear alongside it, never inside it.
 
+- **Optional WiFi STA uplink (`sta_uplink_en`).** The WiFi uplink is now a master switch, off by default, exposed as "Use as uplink" on the Status → Uplink WiFi card and via `POST /api/wifi-uplink`. The device's primary role is a drop-in wired Tailscale router: Ethernet is the uplink, the soft-AP exists for provisioning, and WiFi-as-uplink is opt-in. With it off, the STA netif is still created (the AP DNS copy, ACL hooks and route composition reference it) but no credentials are installed and it never associates — an unprovisioned board no longer sits in a permanent association-retry loop against the Kconfig placeholder SSID, scanning on the same radio the AP is using. Applied live, no reboot. On update from a build without the key, the default is derived rather than forced: a board with saved WiFi networks keeps WiFi enabled, a fresh board gets the wired-first default.
+
+- **Ethernet traffic counters.** `eth.bytes_in` / `eth.bytes_out` in `/api/status`, rendered as a "Traffic" row on the Status → Ethernet card. Previously only the WiFi STA interface had counters, so a wired device reported no throughput at all.
+
+- **`/favicon.ico` handler + inline SVG icon in the SPA.** Nothing served this URL and the SPA declared no icon, so every open tab produced a recurring "URI not found" WARN plus a 404 in the device log.
+
 ### Fixed
 
 - **Auto-detected routes no longer overwrite user-managed manual routes.** The previous design wrote the ETH CIDR directly into `ts_routes` (the NVS key backing the web-UI textarea), destroying any routes the user had entered by hand and also breaking `maintain_ap_cidr_in_routes()`. Replaced by `tailscale_compose_routes()`, which merges all sources at connect time without ever writing to `ts_routes`.
@@ -23,6 +29,24 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **WiFi STA CIDR not populated when enabling auto-routing from the web UI.** When `sta_route_en=0` at boot, the DHCP event handler skips the CIDR cache write. If the user later enabled auto-routing via the Status card, `sta_route_cidr` was still empty, causing the next Tailscale restart to silently advertise no STA routes. The `/api/sta-routing` handler now reads the live STA netif IP immediately on enable and writes the CIDR to NVS.
 
 - **DNS relay task deadlock on boot.** The DNS relay state callback (`dns_relay_state_cb`) was registered before the default netif was set, causing a deadlock when the relay task interacted with the still-initialising lwIP DNS stack. Fixed by deferring relay initialisation until after the default netif is established.
+
+- **ACL firewall was not enforced on the Ethernet uplink.** `netif_hooks_init()` attached the packet filter to the WiFi STA and soft-AP netifs only, so on a wired device every `TO_ESP` / `FROM_ESP` rule was accepted by the UI, persisted to NVS and displayed as active while being enforced on nothing — as was the STA TTL override. The two uplinks now share those chains, matching how `acl.h` defines them ("uplink input" / "uplink output"). **Review your firewall rules after updating:** a rule that has silently been inert on a wired box will start taking effect.
+
+- **Concurrent Tailscale reconnects could use freed memory.** `tailscale_connect_task` is spawned from six call sites (the STA and ETH got-IP handlers, three route-toggle endpoints and the Tailscale config save) with nothing serialising them. They all end in `tailscale_connect()`, which tears down `s_microlink` and builds a new instance — two tasks in there at once meant one calling `microlink_destroy()` on the handle the other was initialising through, or both calling `microlink_init()` and leaking the first instance with its tasks and sockets live. Trivially reachable: the three per-interface "Auto-route" toggles sit next to each other on the Status page and each one restarts Tailscale. Connect and disconnect are now mutually exclusive, and redundant requests coalesce instead of piling up 30-second SNTP waiters.
+
+- **Exit-node teardown could restore a dead default route.** Turning exit-node mode off handed the default route back to whichever netif held it when the mode was switched on. On a wired box those routinely differ — it boots with the WiFi STA as default and ETH takes over on its DHCP lease — so the restore pointed at an interface with no address and black-holed everything outbound. The live uplink is now preferred, with the remembered netif only as a fallback.
+
+- **Route hook could return a down interface.** The lan-bypass netif-prefix match (step 2a) accepted any netif holding an address, without checking it was up and link-up. Returning a netif from `ip4_route_src_hook` bypasses the check `ip4_route()` would otherwise apply, so an interface with a stale address became a silent black hole rather than a reportable routing failure. Mirrored into `route_explain()` so the `/diag` route lookup keeps matching the live hook.
+
+- **Out-of-bounds read parsing the session cookie.** `session_find_for_req()` indexed the candidate token at its full length to check the delimiter, without bounding it against the header buffer — a `ts_session=` landing within a token-length of the end of a long `Cookie` header read past the buffer. The comparison is now length-bounded and constant-time. The buffer also grew from 160 to 512 bytes and tolerates `ESP_ERR_HTTPD_RESULT_TRUNC`: previously a browser holding a couple of unrelated cookies for the origin overflowed it and was logged out with no indication why.
+
+- **URI-handler registration failures were silent.** All 57 `httpd_register_uri_handler()` calls discarded their return value, so filling `max_uri_handlers` (which stood at 60) would have dropped whichever endpoints came last with no diagnostic. Failures now log; the limit is 80.
+
+- **Ethernet MAC reported as `00:00:00:00:00:00` before link-up**, which is indistinguishable from the all-zero-SHAR bug that made the W5500 silently undiagnosable. The status cache is now seeded when the MAC is programmed.
+
+- **Netif glue leaked when `esp_eth_start()` failed** — the error path destroyed the netif with the glue still attached.
+
+- **`ap_connect` / `sta_connect` / `connect_count` were not `volatile`** despite being written from the WiFi and ETH event tasks and read from the HTTP server task, with `telemetry.c` spin-waiting on `ap_connect`. It happened to work only because `vTaskDelay()` is a call the compiler cannot see through.
 
 - **SNAT silently force-enabled on ETH detection.** The ETH IP event handler and `/api/eth-routing` handler were unconditionally setting `tailscale_snat_subnet_routes=1` in NVS whenever ETH routing was enabled. SNAT is a security-sensitive user choice; this hidden side-effect has been removed.
 

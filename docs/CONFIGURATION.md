@@ -67,6 +67,36 @@ Routes advertised to the tailnet come from two independent sources, merged at co
 1. **Manual routes** — the *Advertised subnet routes* textarea on the Tailscale tab. One CIDR per line. This field is the user's to manage; the firmware never modifies it.
 2. **Per-interface auto-routes** — opt-in toggles in the Status cards (see below). Each interface caches or computes its CIDR independently and merges it with the manual list. Duplicates are removed before the combined list is passed to microlink.
 
+### Status page — WiFi uplink master switch
+
+The **Use as uplink** row at the top of the Status → Uplink WiFi card
+controls whether WiFi STA is used as an uplink at all. It is **off by
+default**: this device's primary role is a drop-in wired Tailscale router
+— Ethernet is the uplink and the soft-AP exists for provisioning.
+
+Two things this switch is *not*:
+
+- It is **not** the soft-AP. The provisioning AP is independent and stays
+  up regardless — you configure a wired-only device over the AP with the
+  WiFi uplink switched off, which is the normal case.
+- It is **not** the **Auto-route** toggle below it. Auto-route controls
+  whether the STA's *subnet* is advertised to the tailnet; this controls
+  whether the radio associates upstream at all.
+
+With it off, the STA netif still exists (the AP DNS copy, ACL hooks and
+route composition reference it) but no credentials are installed and it
+never associates — so an unprovisioned board doesn't sit in a permanent
+association-retry loop, scanning on the same single 2.4 GHz radio the AP
+is using. Changes apply live; no reboot.
+
+On update from a firmware without this setting, the default is derived
+rather than forced: a board that already had saved WiFi networks keeps
+WiFi enabled, a fresh board gets the wired-first default.
+
+Overall health on the Status page reflects this: **Degraded** means *no*
+uplink is up. A wired-only box with WiFi deliberately off reads
+`Disabled` on the WiFi card and stays **Online**.
+
 ### Status page — subnet routing toggles
 
 Each network interface on the Status dashboard has an **Auto-route** (or **Advertise AP**) row with a checkbox and **Save** button. Enabling it advertises that interface's subnet to the tailnet; disabling it removes it from the composed route list. Changes take effect on the next Tailscale reconnect (triggered automatically).
@@ -93,10 +123,15 @@ Four chains, **first match wins**; an empty chain allows by default.
 
 | Chain | Direction |
 |---|---|
-| `TO_ESP` | Internet → ESP |
-| `FROM_ESP` | ESP → Internet |
+| `TO_ESP` | Internet → ESP (any uplink: wired ETH or WiFi STA) |
+| `FROM_ESP` | ESP → Internet (any uplink) |
 | `TO_AP` | Clients → ESP |
 | `FROM_AP` | ESP → Clients |
+
+The `*_ESP` chains apply to **both** uplinks. Before v0.1.20 they were
+attached only to the WiFi STA interface, so on a wired device every
+`TO_ESP` / `FROM_ESP` rule was accepted, saved and displayed but enforced
+on nothing — review your rules after updating.
 
 Per rule: **source** / **destination** (`any` or CIDR), **protocol**
 (Any / ICMP / TCP / UDP), **source/dest port** (`0` = any, TCP/UDP only),
