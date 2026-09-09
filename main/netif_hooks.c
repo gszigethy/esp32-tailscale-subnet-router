@@ -38,6 +38,8 @@ static netif_input_fn       original_sta_input       = NULL;
 static netif_linkoutput_fn  original_sta_linkoutput  = NULL;
 static netif_input_fn       original_ap_input        = NULL;
 static netif_linkoutput_fn  original_ap_linkoutput   = NULL;
+static netif_input_fn       original_eth_input       = NULL;
+static netif_linkoutput_fn  original_eth_linkoutput  = NULL;
 
 /* Wire-byte counters. Updated on the LWIP TCPIP task, read from the
  * HTTP server task. Display-only — torn reads at the 32-bit boundary
@@ -46,11 +48,15 @@ static volatile uint64_t s_sta_bytes_in  = 0;
 static volatile uint64_t s_sta_bytes_out = 0;
 static volatile uint64_t s_ap_bytes_in   = 0;
 static volatile uint64_t s_ap_bytes_out  = 0;
+static volatile uint64_t s_eth_bytes_in  = 0;
+static volatile uint64_t s_eth_bytes_out = 0;
 
 uint64_t netif_hooks_get_sta_bytes_in (void) { return s_sta_bytes_in;  }
 uint64_t netif_hooks_get_sta_bytes_out(void) { return s_sta_bytes_out; }
 uint64_t netif_hooks_get_ap_bytes_in  (void) { return s_ap_bytes_in;   }
 uint64_t netif_hooks_get_ap_bytes_out (void) { return s_ap_bytes_out;  }
+uint64_t netif_hooks_get_eth_bytes_in (void) { return s_eth_bytes_in;  }
+uint64_t netif_hooks_get_eth_bytes_out(void) { return s_eth_bytes_out; }
 
 /* TTL override (0 = pass through). Read on every STA-out packet, set
  * by the /api/network POST handler + the boot-time NVS load. Single
@@ -245,6 +251,29 @@ static err_t sta_linkoutput_hook(struct netif *netif, struct pbuf *p)
     return original_sta_linkoutput ? original_sta_linkoutput(netif, p) : ERR_VAL;
 }
 
+/* Wired uplink. Shares the ACL_TO_ESP / ACL_FROM_ESP chains with WiFi STA
+ * because those chains are defined as "uplink input/output" (acl.h), not as
+ * WiFi-specific — the firewall UI calls them to_esp / from_esp for exactly
+ * that reason. Until these hooks existed, ETH was simply not filtered: on a
+ * wired-first device every to_esp/from_esp rule the operator wrote was
+ * accepted by the UI, persisted to NVS, displayed as active, and enforced on
+ * nothing. The TTL override was equally inert. */
+static err_t eth_input_hook(struct pbuf *p, struct netif *netif)
+{
+    if (p) s_eth_bytes_in += p->tot_len;
+    if (acl_drops(acl_check_and_tap(ACL_TO_ESP, p, false))) { pbuf_free(p); return ERR_OK; }
+    return original_eth_input ? original_eth_input(p, netif) : ERR_VAL;
+}
+
+static err_t eth_linkoutput_hook(struct netif *netif, struct pbuf *p)
+{
+    if (p) s_eth_bytes_out += p->tot_len;
+    /* Before the ACL check, so rules see what actually goes out the wire. */
+    apply_sta_ttl_override(p);
+    if (acl_drops(acl_check_and_tap(ACL_FROM_ESP, p, false))) { return ERR_OK; }
+    return original_eth_linkoutput ? original_eth_linkoutput(netif, p) : ERR_VAL;
+}
+
 static err_t ap_input_hook(struct pbuf *p, struct netif *netif)
 {
     if (p) s_ap_bytes_in += p->tot_len;
@@ -276,6 +305,10 @@ void netif_hooks_init(void)
 
     esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     esp_netif_t *ap  = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    /* NULL when the W5500 is absent or failed to init — WiFi-only boards are
+     * unaffected. app_main calls us after eth_uplink_init(), so the netif is
+     * already registered by the time we look. */
+    esp_netif_t *eth = esp_netif_get_handle_from_ifkey("ETH_DEF");
 
     if (sta) {
         struct netif *nif = esp_netif_get_netif_impl(sta);
@@ -298,5 +331,16 @@ void netif_hooks_init(void)
         }
     }
 
-    installed = (sta != NULL) || (ap != NULL);
+    if (eth) {
+        struct netif *nif = esp_netif_get_netif_impl(eth);
+        if (nif) {
+            original_eth_input      = nif->input;
+            original_eth_linkoutput = nif->linkoutput;
+            nif->input              = eth_input_hook;
+            nif->linkoutput         = eth_linkoutput_hook;
+            ESP_LOGI(TAG, "ETH hooks installed on %c%c%d", nif->name[0], nif->name[1], nif->num);
+        }
+    }
+
+    installed = (sta != NULL) || (ap != NULL) || (eth != NULL);
 }
