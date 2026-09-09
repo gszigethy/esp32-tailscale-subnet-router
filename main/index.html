@@ -1592,7 +1592,6 @@
             <span class="stat-value flex items-center gap-2">
               <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer; margin:0;">
                 <input type="checkbox" id="eth-uplink-en-toggle">
-                <span id="eth-uplink-en-label" style="font-size:0.85rem;">Enable</span>
               </label>
               <button class="btn btn-sm btn-primary" id="eth-uplink-save" style="padding:0.2rem 0.6rem; font-size:0.8rem;">Save</button>
               <span id="eth-uplink-status" style="font-size:0.8rem; color:var(--success); display:none;">Saved</span>
@@ -1634,7 +1633,6 @@
             <span class="stat-value flex items-center gap-2">
               <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer; margin:0;">
                 <input type="checkbox" id="eth-route-en-toggle">
-                <span id="eth-route-en-label" style="font-size:0.85rem;">Enable</span>
               </label>
               <button class="btn btn-sm btn-primary" id="eth-route-save" style="padding:0.2rem 0.6rem; font-size:0.8rem;">Save</button>
               <span id="eth-route-status" style="font-size:0.8rem; color:var(--success); display:none;">Saved</span>
@@ -1656,7 +1654,7 @@
                   <circle cx="12" cy="20" r="1"/>
                 </svg>
               </span>
-              <span class="card-title">Uplink WiFi</span>
+              <span class="card-title">WiFi Uplink</span>
             </div>
             <span class="badge badge-neutral" id="uplink-status-badge">—</span>
           </div>
@@ -1666,7 +1664,6 @@
               <span class="stat-value flex items-center gap-2">
                 <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer; margin:0;">
                   <input type="checkbox" id="wifi-uplink-en-toggle">
-                  <span id="wifi-uplink-en-label" style="font-size:0.85rem;">Enable</span>
                 </label>
                 <button class="btn btn-sm btn-primary" id="wifi-uplink-save" style="padding:0.2rem 0.6rem; font-size:0.8rem;">Save</button>
                 <span id="wifi-uplink-status" style="font-size:0.8rem; color:var(--success); display:none;">Saved</span>
@@ -1721,7 +1718,6 @@
               <span class="stat-value flex items-center gap-2">
                 <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer; margin:0;">
                   <input type="checkbox" id="sta-route-en-toggle">
-                  <span id="sta-route-en-label" style="font-size:0.85rem;">Enable</span>
                 </label>
                 <button class="btn btn-sm btn-primary" id="sta-route-save" style="padding:0.2rem 0.6rem; font-size:0.8rem;">Save</button>
                 <span id="sta-route-status" style="font-size:0.8rem; color:var(--success); display:none;">Saved</span>
@@ -1780,7 +1776,6 @@
               <span class="stat-value flex items-center gap-2">
                 <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer; margin:0;">
                   <input type="checkbox" id="ap-route-en-toggle">
-                  <span id="ap-route-en-label" style="font-size:0.85rem;">Enable</span>
                 </label>
                 <button class="btn btn-sm btn-primary" id="ap-route-save" style="padding:0.2rem 0.6rem; font-size:0.8rem;">Save</button>
                 <span id="ap-route-status" style="font-size:0.8rem; color:var(--success); display:none;">Saved</span>
@@ -1947,7 +1942,7 @@
       <div class="page-header">
         <div class="page-header-left">
           <h1 class="page-title">Network</h1>
-          <p class="page-subtitle">Uplink WiFi, access point, IP configuration</p>
+          <p class="page-subtitle">WiFi uplink, access point, IP configuration</p>
         </div>
       </div>
 
@@ -2474,7 +2469,7 @@
           </div>
         </div>
         <div class="card-body">
-          <p class="form-hint" style="margin:0 0 0.75rem 0;">Rough 1 MB transfer over the device's own STA uplink (Cloudflare endpoint). Confirms whether a slowdown is upstream of the router vs. an AP-client / forwarding issue — self-origin traffic bypasses any exit-node tunnel. Timing excludes the TLS handshake.</p>
+          <p class="form-hint" style="margin:0 0 0.75rem 0;">Rough 1 MB transfer over the device's own uplink (Cloudflare endpoint) — Ethernet or WiFi, whichever currently holds the default route. Confirms whether a slowdown is upstream of the router vs. an AP-client / forwarding issue — self-origin traffic bypasses any exit-node tunnel. Timing excludes the TLS handshake.</p>
           <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
             <button class="btn btn-primary btn-md" id="tool-net-down">⬇ Download 1 MB</button>
             <button class="btn btn-primary btn-md" id="tool-net-up">⬆ Upload 1 MB</button>
@@ -3389,8 +3384,6 @@
       var wuToggle = document.getElementById('wifi-uplink-en-toggle');
       if (wuToggle && !wuToggle._touched) {
         wuToggle.checked = (ul.uplink_en !== false);
-        var wuLabel = document.getElementById('wifi-uplink-en-label');
-        if (wuLabel) wuLabel.textContent = wuToggle.checked ? 'Enabled' : 'Disabled';
       }
 
       /* Overall health is per-router, not per-interface: either uplink being
@@ -3459,8 +3452,6 @@
         var euToggle = document.getElementById('eth-uplink-en-toggle');
         if (euToggle && !euToggle._touched) {
           euToggle.checked = (eth.uplink_en !== false);
-          var euLabel = document.getElementById('eth-uplink-en-label');
-          if (euLabel) euLabel.textContent = euToggle.checked ? 'Enabled' : 'Disabled';
         }
 
         // Subnet routing state
@@ -5871,7 +5862,6 @@
       var toggle   = document.getElementById('wifi-uplink-en-toggle');
       var saveBtn  = document.getElementById('wifi-uplink-save');
       var statusEl = document.getElementById('wifi-uplink-status');
-      var label    = document.getElementById('wifi-uplink-en-label');
       if (!toggle || !saveBtn) return;
       toggle.addEventListener('change', function () { toggle._touched = true; });
       saveBtn.addEventListener('click', function () {
@@ -5889,7 +5879,6 @@
             saveBtn.textContent = 'Save';
             toggle._touched = false;
             toggle.checked = !!resp.uplink_en;
-            if (label) label.textContent = resp.uplink_en ? 'Enabled' : 'Disabled';
             if (statusEl) { statusEl.style.display = 'inline'; setTimeout(function () { statusEl.style.display = 'none'; }, 2500); }
             /* Enabling with an empty network list can't associate — say so
                rather than leaving the operator waiting for a link. */
@@ -5914,7 +5903,6 @@
       var toggle   = document.getElementById('eth-uplink-en-toggle');
       var saveBtn  = document.getElementById('eth-uplink-save');
       var statusEl = document.getElementById('eth-uplink-status');
-      var label    = document.getElementById('eth-uplink-en-label');
       if (!toggle || !saveBtn) return;
       toggle.addEventListener('change', function () { toggle._touched = true; });
       saveBtn.addEventListener('click', function () {
@@ -5932,7 +5920,6 @@
             saveBtn.textContent = 'Save';
             toggle._touched = false;
             toggle.checked = !!resp.uplink_en;
-            if (label) label.textContent = resp.uplink_en ? 'Enabled' : 'Disabled';
             if (statusEl) { statusEl.style.display = 'inline'; setTimeout(function () { statusEl.style.display = 'none'; }, 2500); }
             showToast('success', 'Saved',
                       'Ethernet uplink ' + (resp.uplink_en ? 'enabled' : 'disabled') + '.', 4000);
@@ -5971,7 +5958,7 @@
             if (rb) { rb.className = resp.route_en ? 'badge badge-success' : 'badge badge-neutral'; rb.textContent = resp.route_en ? 'On' : 'Off'; }
             if (rc) rc.textContent = resp.route_en ? (resp.route_cidr || '(detecting…)') : '';
             if (statusEl) { statusEl.style.display = 'inline'; setTimeout(function () { statusEl.style.display = 'none'; }, 2500); }
-            showToast('success', 'Saved', 'WiFi STA subnet routing ' + (enabled ? 'enabled' : 'disabled') + '.', 4000);
+            showToast('success', 'Saved', 'WiFi subnet routing ' + (enabled ? 'enabled' : 'disabled') + '.', 4000);
           })
           .catch(function (e) {
             saveBtn.disabled = false;
