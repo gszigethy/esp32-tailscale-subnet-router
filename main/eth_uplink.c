@@ -18,6 +18,7 @@
 
 #include "eth_uplink.h"
 #include <string.h>
+#include <stdlib.h>   /* free() for the hostname string */
 #include "esp_log.h"
 #include "esp_event.h"
 #include "esp_eth.h"
@@ -162,6 +163,13 @@ esp_netif_t *eth_uplink_init(void)
         if (merr != ESP_OK) {
             ESP_LOGE(TAG, "set MAC address failed: %s", esp_err_to_name(merr));
         } else {
+            /* Seed the status cache here rather than waiting for
+             * ETHERNET_EVENT_CONNECTED: the /api/status ETH card reads this,
+             * and with an unplugged cable it would otherwise render
+             * 00:00:00:00:00:00 — the exact symptom of the MAC bug this code
+             * exists to fix, which makes diagnosing an unplugged cable
+             * needlessly confusing. */
+            memcpy(s_mac, eth_mac, sizeof s_mac);
             ESP_LOGI(TAG, "MAC %02x:%02x:%02x:%02x:%02x:%02x",
                      eth_mac[0], eth_mac[1], eth_mac[2],
                      eth_mac[3], eth_mac[4], eth_mac[5]);
@@ -235,6 +243,14 @@ esp_netif_t *eth_uplink_init(void)
     err = esp_eth_start(eth_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_eth_start: %s", esp_err_to_name(err));
+        /* Unwind in the reverse order of construction, glue included — the
+         * attach above bound it to the netif, and destroying the netif with
+         * the glue still registered leaks it and leaves the driver holding a
+         * pointer to freed netif state. */
+        esp_event_handler_unregister(ETH_EVENT, ESP_EVENT_ANY_ID, on_eth_event);
+        esp_event_handler_unregister(IP_EVENT, IP_EVENT_ETH_GOT_IP, on_eth_got_ip);
+        esp_event_handler_unregister(IP_EVENT, IP_EVENT_ETH_LOST_IP, on_eth_lost_ip);
+        esp_eth_del_netif_glue(glue);
         esp_netif_destroy(netif);
         esp_eth_driver_uninstall(eth_handle);
         phy->del(phy);

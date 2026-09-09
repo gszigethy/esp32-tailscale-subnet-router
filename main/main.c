@@ -116,16 +116,21 @@ static EventGroupHandle_t s_wifi_event_group;
  * — WiFi STA or wired ETH (telemetry waits for it before its first send);
  * connect_count is the live count of AP clients (rendered on the Status
  * page and reported in telemetry). */
-int ap_connect   = 0;
-int connect_count = 0;
+/* volatile: telemetry.c's sender_task spin-waits on ap_connect and the web UI
+ * reads all three from the httpd task, while the writers are WiFi/ETH event
+ * handlers on a different task. Without it the compiler is free to hoist the
+ * load out of `while (!ap_connect)` — it only happens to work today because
+ * vTaskDelay() is an opaque call it can't see through. */
+volatile int ap_connect   = 0;
+volatile int connect_count = 0;
 
 /* Per-uplink IP state. ap_connect is the OR of these two and must never be
  * written directly: each uplink's events used to clear it as if they owned
  * it, so a WiFi STA retry loop would zero the flag while ETH was happily
  * leased (and vice versa), reporting a healthy router as degraded.
  * sta_connect is read by web_ui.c so the WiFi card reflects WiFi only. */
-int sta_connect = 0;
-static int s_eth_connect = 0;
+volatile int sta_connect = 0;
+static volatile int s_eth_connect = 0;
 
 static void uplink_state_changed(void)
 {
@@ -1113,10 +1118,15 @@ void app_main(void)
         if (ttl) ESP_LOGI("main", "STA TTL override → %u", (unsigned)ttl);
     }
 
-    /* Load the multi-network table BEFORE wifi_init_sta runs — that
-     * function reads it to set up the initial association. The init
-     * also migrates the legacy single-network NVS keys into slot 0
-     * on first boot. */
+    /* Multi-network table. Despite where this sits, it is NOT what loads the
+     * table for the initial association: wifi_init_sta() runs several hundred
+     * lines above and every wifi_networks_* accessor self-initialises on first
+     * use, so the table is already loaded (and the legacy single-network NVS
+     * keys already migrated into slot 0) by the time we get here, so this is a
+     * redundant reload of identical content. Harmless — nothing can have
+     * touched the table yet, the web server starts further down — and kept
+     * rather than moved because the ordering that actually matters is enforced
+     * inside wifi_networks.c, not by this call site. */
     wifi_networks_init();
 
     /* DHCP reservation table — read now so the cached lookups are
