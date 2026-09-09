@@ -84,7 +84,13 @@ static struct netif *find_sta_netif(void)
     return NULL;
 }
 
-static struct netif *s_original_default = NULL;
+/* The default route as it stood immediately before we pointed it at the WG
+ * netif for exit-node mode, so we can put it back on the way out. Captured at
+ * override time rather than at task start: this task is created before the
+ * uplinks exist, so an early snapshot would freeze whatever happened to be
+ * default during boot (the WiFi STA) and we would later restore a netif that
+ * has no address on a wired-only device. NULL = we are not overriding. */
+static struct netif *s_pre_exit_default = NULL;
 static bool s_wg_udp_pinned = false;
 static esp_ping_handle_t s_keepalive_ping = NULL;
 static uint32_t s_keepalive_target = 0;
@@ -170,15 +176,6 @@ static void route_supervisor_task(void *arg)
          * as usable as soon as it has its IP and is administratively up. */
         bool wg_ready = wg && netif_is_up(wg);
 
-        if (s_original_default == NULL && netif_default != NULL &&
-            (!wg || netif_default != wg)) {
-            s_original_default = netif_default;
-            ESP_LOGI(TAG, "Cached original default route: %c%c%d",
-                     netif_default->name[0], netif_default->name[1],
-                     netif_default->num);
-        }
-
-        struct netif *want = NULL;
         if (tailscale_exit_node_ip != 0) {
             if (wg_ready && sta != NULL) {
                 if (!s_wg_udp_pinned) {
@@ -190,13 +187,36 @@ static void route_supervisor_task(void *arg)
                                  sta->name[0], sta->name[1], sta->num);
                     }
                 }
-                want = wg;
+                if (netif_default != wg) {
+                    if (s_pre_exit_default == NULL) s_pre_exit_default = netif_default;
+                    ESP_LOGI(TAG, "Exit-node on — default route %c%c%d -> %c%c%d",
+                             netif_default ? netif_default->name[0] : '?',
+                             netif_default ? netif_default->name[1] : '?',
+                             netif_default ? netif_default->num : 0,
+                             wg->name[0], wg->name[1], wg->num);
+                    set_default_via_tcpip(wg);
+                }
                 /* Keep the WG session warm on the chosen exit node — without
                  * this its tailscaled lazy-trims us after ~4 minutes idle. */
                 keepalive_start(tailscale_exit_node_ip);
             }
         } else {
-            want = s_original_default;
+            /* Exit-node off. Undo our override exactly once, on the
+             * transition — never on every tick. Re-asserting a remembered
+             * default here fought esp_netif's own uplink promotion and
+             * black-holed a wired device: ETH would win the default on its
+             * DHCP lease and be dragged back to the address-less WiFi STA
+             * within 2 s, so everything outbound failed EHOSTUNREACH.
+             * Whichever uplink esp_netif has promoted is the right answer. */
+            if (s_pre_exit_default != NULL) {
+                if (wg && netif_default == wg) {
+                    ESP_LOGI(TAG, "Exit-node off — restoring default route to %c%c%d",
+                             s_pre_exit_default->name[0], s_pre_exit_default->name[1],
+                             s_pre_exit_default->num);
+                    set_default_via_tcpip(s_pre_exit_default);
+                }
+                s_pre_exit_default = NULL;
+            }
             if (s_wg_udp_pinned) {
                 microlink_t *ml = tailscale_get_microlink();
                 if (ml) microlink_pin_wg_output_netif(ml, NULL);
@@ -204,16 +224,6 @@ static void route_supervisor_task(void *arg)
                 ESP_LOGI(TAG, "WG UDP unpinned (exit node off)");
             }
             keepalive_stop();
-        }
-
-        if (want != NULL && want != netif_default) {
-            ESP_LOGI(TAG, "Switching default route: %c%c%d -> %c%c%d (exit_node=%lu)",
-                     netif_default ? netif_default->name[0] : '?',
-                     netif_default ? netif_default->name[1] : '?',
-                     netif_default ? netif_default->num : 0,
-                     want->name[0], want->name[1], want->num,
-                     (unsigned long)tailscale_exit_node_ip);
-            set_default_via_tcpip(want);
         }
 
         /* Phase 1.9n: rebuild accept-routes table from microlink peer info.
