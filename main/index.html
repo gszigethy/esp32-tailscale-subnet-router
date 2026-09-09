@@ -1587,6 +1587,17 @@
           <span class="badge badge-neutral" id="eth-status-badge">—</span>
         </div>
         <div class="stat-list">
+          <div class="stat-row" style="padding-bottom:0.5rem; border-bottom:1px solid var(--border);">
+            <span class="stat-label" style="align-self:center;">Use as uplink</span>
+            <span class="stat-value flex items-center gap-2">
+              <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer; margin:0;">
+                <input type="checkbox" id="eth-uplink-en-toggle">
+                <span id="eth-uplink-en-label" style="font-size:0.85rem;">Enable</span>
+              </label>
+              <button class="btn btn-sm btn-primary" id="eth-uplink-save" style="padding:0.2rem 0.6rem; font-size:0.8rem;">Save</button>
+              <span id="eth-uplink-status" style="font-size:0.8rem; color:var(--success); display:none;">Saved</span>
+            </span>
+          </div>
           <div class="stat-row">
             <span class="stat-label">IP Address</span>
             <span class="stat-value mono" id="eth-ip">—</span>
@@ -3425,7 +3436,16 @@
         document.getElementById('eth-mac').textContent     = eth.mac     || '—';
         document.getElementById('eth-traffic').textContent = formatTraffic(eth.bytes_in, eth.bytes_out);
         var ethBadge = document.getElementById('eth-status-badge');
-        if (eth.connected) {
+        /* Three states, mirroring the WiFi uplink card's "Disabled" case —
+         * but unlike WiFi, "Disconnected" here stays neutral, not danger:
+         * ETH hardware is an optional add-on (Kconfig-gated), so this card
+         * renders even when no W5500 is physically present, and a permanent
+         * red badge on every WiFi-only device would be a false alarm. */
+        if (eth.uplink_en === false) {
+          ethBadge.className = 'badge badge-neutral';
+          ethBadge.textContent = 'Disabled';
+          ethCard.className = 'card card-stripe-neutral mb-4';
+        } else if (eth.connected) {
           ethBadge.className = 'badge badge-success';
           ethBadge.textContent = 'Connected';
           ethCard.className = 'card card-stripe-success mb-4';
@@ -3433,6 +3453,14 @@
           ethBadge.className = 'badge badge-neutral';
           ethBadge.textContent = 'Disconnected';
           ethCard.className = 'card card-stripe-neutral mb-4';
+        }
+
+        /* Reflect the switch itself, unless the operator is mid-edit. */
+        var euToggle = document.getElementById('eth-uplink-en-toggle');
+        if (euToggle && !euToggle._touched) {
+          euToggle.checked = (eth.uplink_en !== false);
+          var euLabel = document.getElementById('eth-uplink-en-label');
+          if (euLabel) euLabel.textContent = euToggle.checked ? 'Enabled' : 'Disabled';
         }
 
         // Subnet routing state
@@ -5872,6 +5900,42 @@
               showToast('success', 'Saved',
                         'WiFi uplink ' + (resp.uplink_en ? 'enabled' : 'disabled') + '.', 4000);
             }
+          })
+          .catch(function (e) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            showToast('error', 'Save failed', e && e.message ? e.message : 'unknown error', 6000);
+          });
+      });
+    })();
+
+    // Ethernet uplink master switch — Status card Save button
+    (function () {
+      var toggle   = document.getElementById('eth-uplink-en-toggle');
+      var saveBtn  = document.getElementById('eth-uplink-save');
+      var statusEl = document.getElementById('eth-uplink-status');
+      var label    = document.getElementById('eth-uplink-en-label');
+      if (!toggle || !saveBtn) return;
+      toggle.addEventListener('change', function () { toggle._touched = true; });
+      saveBtn.addEventListener('click', function () {
+        var enabled = toggle.checked;
+        saveBtn.disabled = true;
+        saveBtn.textContent = '…';
+        apiFetch('/api/eth-uplink', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ enabled: enabled })
+        })
+          .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+          .then(function (resp) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            toggle._touched = false;
+            toggle.checked = !!resp.uplink_en;
+            if (label) label.textContent = resp.uplink_en ? 'Enabled' : 'Disabled';
+            if (statusEl) { statusEl.style.display = 'inline'; setTimeout(function () { statusEl.style.display = 'none'; }, 2500); }
+            showToast('success', 'Saved',
+                      'Ethernet uplink ' + (resp.uplink_en ? 'enabled' : 'disabled') + '.', 4000);
           })
           .catch(function (e) {
             saveBtn.disabled = false;

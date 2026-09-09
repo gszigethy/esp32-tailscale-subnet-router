@@ -335,6 +335,9 @@ static esp_err_t status_handler(httpd_req_t *req)
         cJSON *eth = cJSON_CreateObject();
         bool eth_conn = eth_uplink_connected();
         cJSON_AddBoolToObject(eth, "connected", eth_conn);
+        /* Same three-state pattern as sta.uplink_en: lets the SPA tell
+         * "switched off" apart from "cable unplugged / no lease yet". */
+        cJSON_AddBoolToObject(eth, "uplink_en", eth_uplink_is_enabled());
         if (eth_conn) {
             uint32_t eth_ip, eth_mask, eth_gw;
             if (eth_uplink_get_ip_info(&eth_ip, &eth_mask, &eth_gw)) {
@@ -4732,6 +4735,44 @@ static const httpd_uri_t uri_wifi_uplink = {
     .uri = "/api/wifi-uplink", .method = HTTP_POST, .handler = wifi_uplink_handler,
 };
 
+/* POST /api/eth-uplink — master switch for using the wired W5500 as an
+ * uplink, mirroring /api/wifi-uplink above. Default ON (unlike WiFi's
+ * default off): this device is primarily a wired router, and a device
+ * upgrading from a firmware without this switch must keep working exactly
+ * as before — flipping the default here would silently drop every existing
+ * deployment's uplink on update. Applied live via eth_uplink_set_enabled():
+ * disabling stops the driver (no reboot needed), enabling restarts it. */
+static esp_err_t eth_uplink_handler(httpd_req_t *req)
+{
+    if (require_auth(req) != ESP_OK) return ESP_FAIL;
+    char *buf = malloc_body_buf(512);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    if (recv_body(req, buf, 512, NULL) != ESP_OK) { free(buf); return ESP_FAIL; }
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON"); return ESP_FAIL; }
+
+    const cJSON *j_enabled = cJSON_GetObjectItem(root, "enabled");
+    if (cJSON_IsBool(j_enabled)) {
+        uint8_t en = cJSON_IsTrue(j_enabled) ? 1 : 0;
+        ESP_LOGI(TAG, "eth-uplink %s", en ? "ON" : "OFF");
+        eth_uplink_set_enabled(en);
+    }
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "uplink_en", eth_uplink_is_enabled());
+    char *s = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_sendstr(req, s ? s : "{}");
+    free(s);
+    return ret;
+}
+static const httpd_uri_t uri_eth_uplink = {
+    .uri = "/api/eth-uplink", .method = HTTP_POST, .handler = eth_uplink_handler,
+};
+
 /* GET /favicon.ico — the SPA declares an inline SVG icon, but browsers and
  * bookmark/PWA paths still probe this URL, and with no handler each probe
  * logged a "URI not found" WARN plus a 404. Serve the same icon (SVG is
@@ -4877,6 +4918,7 @@ void web_ui_init(void)
     reg_uri(server, &uri_sta_routing);
     reg_uri(server, &uri_ap_routing);
     reg_uri(server, &uri_wifi_uplink);
+    reg_uri(server, &uri_eth_uplink);
     reg_uri(server, &uri_favicon);
     ESP_LOGI(TAG, "web UI listening on :%d (HTTP)", conf.server_port);
     /* HTTPS redirect server gone with HTTPS itself — direct HTTP-on-80

@@ -97,6 +97,27 @@ Overall health on the Status page reflects this: **Degraded** means *no*
 uplink is up. A wired-only box with WiFi deliberately off reads
 `Disabled` on the WiFi card and stays **Online**.
 
+### Status page — Ethernet uplink master switch
+
+The same **Use as uplink** row appears at the top of the Status →
+Ethernet Uplink card, for the opposite case: a board with both interfaces
+present where the operator wants to run on WiFi only (a spare ETH port
+reserved for something else, a cable that needs freeing up, or simply
+testing WiFi-only failover) without physically unplugging anything.
+
+Unlike the WiFi switch, this one is **on by default** — Ethernet is this
+device's primary role, so a fresh board and one updating from a firmware
+without this setting both keep working exactly as before.
+
+Turning it off stops the W5500 driver (`esp_eth_stop()`) rather than
+tearing it down: no link, no DHCP lease, no traffic, but the driver stays
+installed and ready, so switching it back on (`esp_eth_start()`) needs no
+reboot. The Ethernet card reads `Disabled` (neutral) while off — as
+opposed to a plain `Disconnected`, which stays neutral too here rather
+than the WiFi card's red: this card renders even on hardware with no
+W5500 physically present, and a permanent red badge on every WiFi-only
+device would be a false alarm.
+
 ### Status page — subnet routing toggles
 
 Each network interface on the Status dashboard has an **Auto-route** (or **Advertise AP**) row with a checkbox and **Save** button. Enabling it advertises that interface's subnet to the tailnet; disabling it removes it from the composed route list. Changes take effect on the next Tailscale reconnect (triggered automatically).

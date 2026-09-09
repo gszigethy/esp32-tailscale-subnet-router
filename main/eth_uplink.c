@@ -36,6 +36,18 @@ static uint32_t s_netmask   = 0;
 static uint32_t s_gw        = 0;
 static uint8_t  s_mac[6]    = {0};
 
+/* Retained past eth_uplink_init() (unlike the local var it used to be) so
+ * eth_uplink_set_enabled() can start/stop the same driver instance later
+ * instead of tearing the whole thing down and rebuilding it. NULL when no
+ * driver exists — hardware absent, Kconfig-disabled, or init failed. */
+static esp_eth_handle_t s_eth_handle = NULL;
+
+/* The master-switch desired state (not the live link — see
+ * eth_uplink_connected() for that). Defaults true so a device upgrading
+ * from a firmware without this switch keeps its existing always-on
+ * behaviour; NVS overrides it once the operator has touched the toggle. */
+static volatile bool s_uplink_en = true;
+
 static void on_eth_event(void *arg, esp_event_base_t base,
                          int32_t id, void *data)
 {
@@ -88,6 +100,17 @@ static void on_eth_lost_ip(void *arg, esp_event_base_t base,
 
 esp_netif_t *eth_uplink_init(void)
 {
+    /* Read the master switch before touching any hardware, so the decision
+     * below (start the driver, or leave it installed but stopped) is made
+     * once, up front. Absent key = upgrading device or fresh NVS → stays at
+     * the true default set above. */
+    {
+        uint8_t v = 1;
+        if (nvs_param_get_u8("eth_uplink_en", &v) == ESP_OK) {
+            s_uplink_en = (v != 0);
+        }
+    }
+
     /* SPI bus ---------------------------------------------------------------- */
     spi_bus_config_t buscfg = {
         .miso_io_num   = CONFIG_ETH_W5500_MISO_GPIO,
@@ -240,30 +263,85 @@ esp_netif_t *eth_uplink_init(void)
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_LOST_IP,
                                                on_eth_lost_ip, NULL));
 
-    err = esp_eth_start(eth_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_eth_start: %s", esp_err_to_name(err));
-        /* Unwind in the reverse order of construction, glue included — the
-         * attach above bound it to the netif, and destroying the netif with
-         * the glue still registered leaks it and leaves the driver holding a
-         * pointer to freed netif state. */
-        esp_event_handler_unregister(ETH_EVENT, ESP_EVENT_ANY_ID, on_eth_event);
-        esp_event_handler_unregister(IP_EVENT, IP_EVENT_ETH_GOT_IP, on_eth_got_ip);
-        esp_event_handler_unregister(IP_EVENT, IP_EVENT_ETH_LOST_IP, on_eth_lost_ip);
-        esp_eth_del_netif_glue(glue);
-        esp_netif_destroy(netif);
-        esp_eth_driver_uninstall(eth_handle);
-        phy->del(phy);
-        mac->del(mac);
-        spi_bus_free((spi_host_device_t)CONFIG_ETH_W5500_SPI_HOST);
-        return NULL;
+    /* Only start the driver if the master switch is on. Skipping esp_eth_start()
+     * — rather than skipping everything above and returning NULL — leaves the
+     * driver fully installed and glued to the netif, so eth_uplink_set_enabled()
+     * can start it later with a plain esp_eth_start() call, no reboot needed.
+     * Mirrors how wifi_init_sta() leaves the STA netif created but installs no
+     * credentials while sta_uplink_en is off. */
+    if (s_uplink_en) {
+        err = esp_eth_start(eth_handle);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_eth_start: %s", esp_err_to_name(err));
+            /* Unwind in the reverse order of construction, glue included — the
+             * attach above bound it to the netif, and destroying the netif with
+             * the glue still registered leaks it and leaves the driver holding a
+             * pointer to freed netif state. */
+            esp_event_handler_unregister(ETH_EVENT, ESP_EVENT_ANY_ID, on_eth_event);
+            esp_event_handler_unregister(IP_EVENT, IP_EVENT_ETH_GOT_IP, on_eth_got_ip);
+            esp_event_handler_unregister(IP_EVENT, IP_EVENT_ETH_LOST_IP, on_eth_lost_ip);
+            esp_eth_del_netif_glue(glue);
+            esp_netif_destroy(netif);
+            esp_eth_driver_uninstall(eth_handle);
+            phy->del(phy);
+            mac->del(mac);
+            spi_bus_free((spi_host_device_t)CONFIG_ETH_W5500_SPI_HOST);
+            return NULL;
+        }
+        ESP_LOGI(TAG, "W5500 started  CS=%d SCK=%d MISO=%d MOSI=%d INT=%d  %dMHz",
+                 CONFIG_ETH_W5500_CS_GPIO, CONFIG_ETH_W5500_SCK_GPIO,
+                 CONFIG_ETH_W5500_MISO_GPIO, CONFIG_ETH_W5500_MOSI_GPIO,
+                 CONFIG_ETH_W5500_INT_GPIO, CONFIG_ETH_W5500_SPI_CLOCK_MHZ);
+    } else {
+        ESP_LOGI(TAG, "W5500 uplink disabled (eth_uplink_en=0) — driver ready, not started");
     }
 
-    ESP_LOGI(TAG, "W5500 started  CS=%d SCK=%d MISO=%d MOSI=%d INT=%d  %dMHz",
-             CONFIG_ETH_W5500_CS_GPIO, CONFIG_ETH_W5500_SCK_GPIO,
-             CONFIG_ETH_W5500_MISO_GPIO, CONFIG_ETH_W5500_MOSI_GPIO,
-             CONFIG_ETH_W5500_INT_GPIO, CONFIG_ETH_W5500_SPI_CLOCK_MHZ);
+    s_eth_handle = eth_handle;
     return netif;
+}
+
+void eth_uplink_set_enabled(uint8_t enable)
+{
+    bool want = (enable != 0);
+    s_uplink_en = want;
+    nvs_param_set_u8("eth_uplink_en", want ? 1 : 0);
+
+    if (!s_eth_handle) {
+        /* No driver to drive — hardware absent, Kconfig-disabled, or init
+         * failed. The switch still persists so the choice sticks if hardware
+         * shows up later (e.g. after a Kconfig rebuild). */
+        ESP_LOGW(TAG, "uplink %s — no W5500 driver present, nothing to start/stop",
+                 want ? "enabled" : "disabled");
+        return;
+    }
+
+    if (want) {
+        esp_err_t err = esp_eth_start(s_eth_handle);
+        /* INVALID_STATE here just means "already started" (esp_eth_start's
+         * own FSM guard) — not an error from this switch's point of view. */
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "uplink enabled — driver started");
+        } else if (err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "esp_eth_start failed: %s", esp_err_to_name(err));
+        }
+    } else {
+        esp_err_t err = esp_eth_stop(s_eth_handle);
+        /* esp_eth_stop() posts ETHERNET_EVENT_STOP, which the netif glue turns
+         * into esp_netif_action_stop() — that brings the netif down, stops its
+         * DHCP client and clears its IP automatically, and our own on_eth_event
+         * handler clears s_connected on the same event. No manual state
+         * cleanup needed here. */
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "uplink disabled — driver stopped");
+        } else if (err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "esp_eth_stop failed: %s", esp_err_to_name(err));
+        }
+    }
+}
+
+bool eth_uplink_is_enabled(void)
+{
+    return s_uplink_en;
 }
 
 bool eth_uplink_connected(void)

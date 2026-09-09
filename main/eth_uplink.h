@@ -41,6 +41,24 @@ bool eth_uplink_get_ip_info(uint32_t *ip, uint32_t *netmask, uint32_t *gw);
  * ETHERNET_EVENT_CONNECTED fires. */
 void eth_uplink_get_mac(uint8_t mac[6]);
 
+/* Master switch for using Ethernet as an uplink at all, independent of
+ * physical link state — mirrors the WiFi STA uplink switch
+ * (sta_uplink_set() in main.c) for boards with both interfaces present.
+ * Persisted in NVS ("eth_uplink_en", default 1) and applied live via
+ * esp_eth_start()/esp_eth_stop(): the driver stays installed either way
+ * (so a later re-enable needs no reboot), it just stops driving the PHY
+ * link while disabled — no traffic, no DHCP lease, esp_netif brings the
+ * netif down and clears its IP automatically through the normal
+ * ETHERNET_EVENT_STOP -> esp_netif_action_stop() path.
+ *
+ * A no-op (logged, not fatal) if eth_uplink_init() never produced a
+ * driver — hardware absent, Kconfig-disabled, or init failed. */
+void eth_uplink_set_enabled(uint8_t enable);
+
+/* Current desired state — the switch itself, not the live link. Mirrors
+ * eth_uplink_connected() the way sta_uplink_en mirrors sta_connect. */
+bool eth_uplink_is_enabled(void);
+
 #ifdef __cplusplus
 }
 #endif
