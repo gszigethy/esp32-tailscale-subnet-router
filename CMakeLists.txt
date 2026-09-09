@@ -35,3 +35,24 @@ idf_component_get_property(_i2c_master_lib esp_driver_i2c COMPONENT_LIB)
 if(_i2c_master_lib)
     target_compile_options(${_i2c_master_lib} PRIVATE -Wno-error=maybe-uninitialized)
 endif()
+
+# GCC 14 surfaces unused-variable warnings in the vendored wireguard_lwip and
+# microlink upstream sources that are errors under -Werror. Suppress them here
+# rather than patching the submodule, so a fresh submodule checkout still builds.
+idf_component_get_property(_wg_lib wireguard_lwip COMPONENT_LIB)
+if(_wg_lib)
+    set_source_files_properties(
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/microlink/components/microlink/components/wireguard_lwip/src/wireguardif.c
+        TARGET_DIRECTORY ${_wg_lib}
+        PROPERTIES COMPILE_FLAGS "-Wno-unused-variable"
+    )
+endif()
+
+idf_component_get_property(_ml_lib microlink COMPONENT_LIB)
+if(_ml_lib)
+    set_source_files_properties(
+        ${CMAKE_CURRENT_SOURCE_DIR}/external/microlink/components/microlink/src/ml_coord.c
+        TARGET_DIRECTORY ${_ml_lib}
+        PROPERTIES COMPILE_FLAGS "-Wno-unused-but-set-variable -Wno-unused-variable"
+    )
+endif()

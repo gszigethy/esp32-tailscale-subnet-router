@@ -4545,9 +4545,9 @@ static esp_err_t sta_routing_handler(httpd_req_t *req)
                     uint32_t net = sinfo.ip.addr & sinfo.netmask.addr;
                     int pfx = subnet_mask_prefix_len(sinfo.netmask.addr);
                     if (pfx >= 0) {
-                        char netbuf[16], cidrbuf[20];
+                        char netbuf[16], cidrbuf[27];
                         ip4_to_str(net, netbuf, sizeof netbuf);
-                        snprintf(cidrbuf, sizeof cidrbuf, "%s/%u", netbuf, (unsigned)pfx);
+                        snprintf(cidrbuf, sizeof cidrbuf, "%s/%u", netbuf, (unsigned)(pfx & 0x3f));
                         nvs_param_set_str("sta_route_cidr", cidrbuf);
                         ESP_LOGI(TAG, "sta-routing ON — CIDR %s", cidrbuf);
                     } else {
