@@ -112,12 +112,25 @@ static int s_retry_num = 0;
 /* FreeRTOS event group to signal when we are connected/disconnected */
 static EventGroupHandle_t s_wifi_event_group;
 
-/* Cross-module state. ap_connect tracks whether the upstream STA link
- * is up (telemetry waits for it before its first send); connect_count
- * is the live count of AP clients (rendered on the Status page and
- * reported in telemetry). */
+/* Cross-module state. ap_connect tracks whether ANY upstream uplink is up
+ * — WiFi STA or wired ETH (telemetry waits for it before its first send);
+ * connect_count is the live count of AP clients (rendered on the Status
+ * page and reported in telemetry). */
 int ap_connect   = 0;
 int connect_count = 0;
+
+/* Per-uplink IP state. ap_connect is the OR of these two and must never be
+ * written directly: each uplink's events used to clear it as if they owned
+ * it, so a WiFi STA retry loop would zero the flag while ETH was happily
+ * leased (and vice versa), reporting a healthy router as degraded.
+ * sta_connect is read by web_ui.c so the WiFi card reflects WiFi only. */
+int sta_connect = 0;
+static int s_eth_connect = 0;
+
+static void uplink_state_changed(void)
+{
+    ap_connect = (sta_connect || s_eth_connect) ? 1 : 0;
+}
 
 /* Per-interface subnet routing flags.
  * eth_route_en: auto-advertise ETH LAN CIDR.  Default 1 — zero-touch on ETH hardware.
@@ -330,7 +343,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         esp_wifi_connect();
         ESP_LOGI(TAG_STA, "Station started");
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        ap_connect = 0;
+        sta_connect = 0;
+        uplink_state_changed();
         /* Multi-network rotation: stay on the current SSID for
          * WIFI_RETRIES_PER_NETWORK association attempts, then roll
          * forward to the next configured slot. Single-network setups
@@ -351,7 +365,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG_STA, "Got IP:" IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
         s_net_retries = 0;   /* successful association — clear the rotation counter */
-        ap_connect = 1;
+        sta_connect = 1;
+        uplink_state_changed();
 
         /* Single radio: the AP must share the STA's channel or the radio
          * time-shares between the two and throughput collapses 5-10x. The STA
@@ -481,7 +496,8 @@ static void eth_ip_event_handler(void *arg, esp_event_base_t event_base,
     if (event_id == IP_EVENT_ETH_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI("ETH", "Got IP:" IPSTR, IP2STR(&event->ip_info.ip));
-        ap_connect = 1;
+        s_eth_connect = 1;
+        uplink_state_changed();
 
         /* Promote ETH to the default route now that it has a valid DHCP
          * lease.  Doing this here (not at eth_uplink_init() time) guarantees
@@ -533,7 +549,8 @@ static void eth_ip_event_handler(void *arg, esp_event_base_t event_base,
 
     } else if (event_id == IP_EVENT_ETH_LOST_IP) {
         ESP_LOGI("ETH", "Lost IP — uplink down");
-        ap_connect = 0;
+        s_eth_connect = 0;
+        uplink_state_changed();
     }
 }
 

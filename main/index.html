@@ -3337,15 +3337,21 @@
         uplinkBadge.className = 'badge badge-success';
         uplinkBadge.textContent = 'Connected';
         document.getElementById('card-uplink').className = 'card card-stripe-success';
-        /* Restore overall-badge to Online — a momentary disconnect on an
-         * earlier tick used to bump it to Degraded and the badge stayed
-         * stuck until the operator reloaded the page. */
-        overall.className = 'badge badge-success';
-        overall.innerHTML = '<span class="badge-dot badge-dot-pulse"></span> Online';
       } else {
         uplinkBadge.className = 'badge badge-danger';
         uplinkBadge.textContent = 'Disconnected';
         document.getElementById('card-uplink').className = 'card card-stripe-danger';
+      }
+
+      /* Overall health is per-router, not per-interface: either uplink being
+       * up means we can route, so only flag Degraded when BOTH are down. A
+       * wired-only box (or a WiFi-only box) is fully healthy. Recomputed on
+       * every tick so a momentary flap can't leave the badge stuck. */
+      var anyUplink = !!(ul.connected || (data.eth && data.eth.connected));
+      if (anyUplink) {
+        overall.className = 'badge badge-success';
+        overall.innerHTML = '<span class="badge-dot badge-dot-pulse"></span> Online';
+      } else {
         overall.className = 'badge badge-warning';
         overall.innerHTML = '<span class="badge-dot"></span> Degraded';
       }

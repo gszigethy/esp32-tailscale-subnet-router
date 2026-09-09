@@ -386,8 +386,8 @@ static void sender_task(void *arg)
 {
     (void)arg;
 
-    /* Wait for first STA association. ap_connect is a global int set
-     * by the WiFi event handlers in esp32_nat_router.c. */
+    /* Wait until some uplink can carry the send. ap_connect is a global int
+     * owned by main.c: the OR of the WiFi STA and wired ETH link states. */
     while (!ap_connect) {
         vTaskDelay(pdMS_TO_TICKS(2000));
     }

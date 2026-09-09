@@ -62,8 +62,11 @@
 #include "freertos/task.h"
 #include "driver/temperature_sensor.h"
 
-/* Globals owned by main.c — link status flags rendered in /api/status. */
-extern int ap_connect;
+/* Globals owned by main.c — link status flags rendered in /api/status.
+ * sta_connect is WiFi STA alone (not main.c's any-uplink ap_connect), so the
+ * Status page's WiFi card doesn't claim "Connected" on an ETH-only box. The
+ * wired side is reported separately from eth_uplink_connected(). */
+extern int sta_connect;
 extern int connect_count;
 extern volatile uint8_t eth_route_en;
 extern volatile uint8_t sta_route_en;
@@ -266,9 +269,9 @@ static esp_err_t status_handler(httpd_req_t *req)
 
     /* STA (uplink) — SSID, IP, RSSI, MAC. */
     cJSON *sta = cJSON_CreateObject();
-    cJSON_AddBoolToObject(sta, "connected", ap_connect != 0);
+    cJSON_AddBoolToObject(sta, "connected", sta_connect != 0);
     wifi_ap_record_t apr;
-    if (ap_connect && esp_wifi_sta_get_ap_info(&apr) == ESP_OK) {
+    if (sta_connect && esp_wifi_sta_get_ap_info(&apr) == ESP_OK) {
         cJSON_AddStringToObject(sta, "ssid", (const char *)apr.ssid);
         cJSON_AddNumberToObject(sta, "rssi", apr.rssi);
         cJSON_AddNumberToObject(sta, "channel", apr.primary);
