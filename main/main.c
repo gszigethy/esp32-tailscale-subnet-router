@@ -141,6 +141,14 @@ volatile uint8_t eth_route_en = 1;
 volatile uint8_t sta_route_en = 0;
 volatile uint8_t ap_route_en  = 0;
 
+/* WiFi STA uplink master switch. This device is primarily a drop-in wired
+ * Tailscale router: Ethernet is the primary uplink, the AP exists for
+ * provisioning, and WiFi-as-uplink is an opt-in secondary. Default off, so an
+ * unprovisioned board doesn't sit in a permanent association-retry loop
+ * against the Kconfig placeholder SSID — that scanning contends for the single
+ * shared 2.4 GHz radio the AP is using. Loaded at boot in app_main. */
+volatile uint8_t sta_uplink_en = 0;
+
 /* Forward declarations — definitions land further down in this file. */
 /* Non-static — also called from web_ui.c when DNS-relay state changes,
  * so the new DHCP-offered DNS takes effect immediately for new leases. */
@@ -314,6 +322,35 @@ static void wifi_apply_network(int idx)
     }
 }
 
+/* Apply a WiFi-uplink enable/disable at runtime, so the operator doesn't have
+ * to reboot after flipping the switch. Lives here rather than in web_ui.c
+ * because it needs wifi_apply_network() and the rotation counters, which are
+ * private to this file. Persists the choice, then makes the radio match it. */
+void sta_uplink_set(uint8_t enable)
+{
+    uint8_t was = sta_uplink_en;
+    sta_uplink_en = enable ? 1 : 0;
+    nvs_param_set_u8("sta_uplink_en", sta_uplink_en);
+    if (sta_uplink_en == was) return;
+
+    if (sta_uplink_en) {
+        /* wifi_init_sta() deliberately installed no credentials while the
+         * uplink was off, so push slot 0 in before asking to associate. */
+        if (wifi_networks_count() > 0) {
+            s_net_current = 0;
+            s_net_retries = 0;
+            wifi_apply_network(0);
+            esp_wifi_connect();
+            ESP_LOGI(TAG_STA, "uplink enabled — associating");
+        } else {
+            ESP_LOGW(TAG_STA, "uplink enabled but no networks configured");
+        }
+    } else {
+        esp_wifi_disconnect();
+        ESP_LOGI(TAG_STA, "uplink disabled — disconnecting");
+    }
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
@@ -340,11 +377,19 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                  MAC2STR(event->mac), event->aid, event->reason);
         if (connect_count > 0) connect_count--;
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-        ESP_LOGI(TAG_STA, "Station started");
+        if (sta_uplink_en) {
+            esp_wifi_connect();
+            ESP_LOGI(TAG_STA, "Station started");
+        } else {
+            ESP_LOGI(TAG_STA, "Station started — uplink disabled, not associating");
+        }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         sta_connect = 0;
         uplink_state_changed();
+        /* Uplink switched off (or never on): stop here. Without this the
+         * handler's own esp_wifi_connect() below turns a single disconnect
+         * into an endless retry loop that keeps the radio scanning. */
+        if (!sta_uplink_en) return;
         /* Multi-network rotation: stay on the current SSID for
          * WIFI_RETRIES_PER_NETWORK association attempts, then roll
          * forward to the next configured slot. Single-network setups
@@ -682,6 +727,16 @@ esp_netif_t *wifi_init_sta(void)
     }
     free(nvs_hostname);
 
+    /* Uplink disabled: leave the STA netif created (the AP DNS copy, ACL
+     * hooks and route composition all reference it) but install no
+     * credentials and never associate. Returning early also avoids writing
+     * the Kconfig placeholder SSID into the driver, which is what used to
+     * leave an unprovisioned board scanning forever. */
+    if (!sta_uplink_en) {
+        ESP_LOGI(TAG_STA, "wifi_init_sta: WiFi uplink disabled — AP-only, not associating");
+        return esp_netif_sta;
+    }
+
     if (wifi_networks_count() > 0) {
         ESP_LOGI(TAG_STA, "wifi_init_sta: %d network(s) configured, starting with slot 0",
                  wifi_networks_count());
@@ -891,6 +946,22 @@ void app_main(void)
         uint8_t v = 0;
         nvs_param_get_u8("ap_route_en", &v);
         ap_route_en = v;
+    }
+
+    /* WiFi STA uplink switch. Absent key = never configured, so derive the
+     * default instead of forcing one: a board that already has saved WiFi
+     * networks was provisioned as a WiFi router and must keep working across
+     * an update, while a fresh board gets the wired-first default. Any
+     * explicit operator choice is stored and wins from then on. */
+    {
+        uint8_t v = 0;
+        if (nvs_param_get_u8("sta_uplink_en", &v) == ESP_OK) {
+            sta_uplink_en = v ? 1 : 0;
+        } else {
+            sta_uplink_en = (wifi_networks_count() > 0) ? 1 : 0;
+            ESP_LOGI("main", "sta_uplink_en unset — defaulting to %s (%d saved network(s))",
+                     sta_uplink_en ? "on" : "off", wifi_networks_count());
+        }
     }
 
     /* MTU / MSS clamp / PMTU manager. Owns the wg netif MTU plus the AP

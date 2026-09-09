@@ -1637,6 +1637,17 @@
             <span class="badge badge-neutral" id="uplink-status-badge">—</span>
           </div>
           <div class="stat-list">
+            <div class="stat-row" style="padding-bottom:0.5rem; border-bottom:1px solid var(--border);">
+              <span class="stat-label" style="align-self:center;">Use as uplink</span>
+              <span class="stat-value flex items-center gap-2">
+                <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer; margin:0;">
+                  <input type="checkbox" id="wifi-uplink-en-toggle">
+                  <span id="wifi-uplink-en-label" style="font-size:0.85rem;">Enable</span>
+                </label>
+                <button class="btn btn-sm btn-primary" id="wifi-uplink-save" style="padding:0.2rem 0.6rem; font-size:0.8rem;">Save</button>
+                <span id="wifi-uplink-status" style="font-size:0.8rem; color:var(--success); display:none;">Saved</span>
+              </span>
+            </div>
             <div class="stat-row">
               <span class="stat-label">SSID</span>
               <span class="stat-value flex items-center gap-2">
@@ -3333,7 +3344,14 @@
 
       var uplinkBadge = document.getElementById('uplink-status-badge');
       var overall    = document.getElementById('overall-badge');
-      if (ul.connected) {
+      /* Three states, not two: an operator who switched WiFi off is looking at
+       * a healthy wired router, so render that neutrally. Only a WiFi uplink
+       * that is meant to be up and isn't counts as a fault. */
+      if (ul.uplink_en === false) {
+        uplinkBadge.className = 'badge badge-neutral';
+        uplinkBadge.textContent = 'Disabled';
+        document.getElementById('card-uplink').className = 'card card-stripe-neutral';
+      } else if (ul.connected) {
         uplinkBadge.className = 'badge badge-success';
         uplinkBadge.textContent = 'Connected';
         document.getElementById('card-uplink').className = 'card card-stripe-success';
@@ -3341,6 +3359,14 @@
         uplinkBadge.className = 'badge badge-danger';
         uplinkBadge.textContent = 'Disconnected';
         document.getElementById('card-uplink').className = 'card card-stripe-danger';
+      }
+
+      /* Reflect the switch itself, unless the operator is mid-edit. */
+      var wuToggle = document.getElementById('wifi-uplink-en-toggle');
+      if (wuToggle && !wuToggle._touched) {
+        wuToggle.checked = (ul.uplink_en !== false);
+        var wuLabel = document.getElementById('wifi-uplink-en-label');
+        if (wuLabel) wuLabel.textContent = wuToggle.checked ? 'Enabled' : 'Disabled';
       }
 
       /* Overall health is per-router, not per-interface: either uplink being
@@ -5788,6 +5814,49 @@
             if (rc) rc.textContent = resp.route_en ? (resp.route_cidr || '(detecting…)') : '';
             if (statusEl) { statusEl.style.display = 'inline'; setTimeout(function () { statusEl.style.display = 'none'; }, 2500); }
             showToast('success', 'Saved', 'Ethernet subnet routing ' + (enabled ? 'enabled' : 'disabled') + '.', 4000);
+          })
+          .catch(function (e) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            showToast('error', 'Save failed', e && e.message ? e.message : 'unknown error', 6000);
+          });
+      });
+    })();
+
+    // WiFi uplink master switch — Status card Save button
+    (function () {
+      var toggle   = document.getElementById('wifi-uplink-en-toggle');
+      var saveBtn  = document.getElementById('wifi-uplink-save');
+      var statusEl = document.getElementById('wifi-uplink-status');
+      var label    = document.getElementById('wifi-uplink-en-label');
+      if (!toggle || !saveBtn) return;
+      toggle.addEventListener('change', function () { toggle._touched = true; });
+      saveBtn.addEventListener('click', function () {
+        var enabled = toggle.checked;
+        saveBtn.disabled = true;
+        saveBtn.textContent = '…';
+        apiFetch('/api/wifi-uplink', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ enabled: enabled })
+        })
+          .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+          .then(function (resp) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            toggle._touched = false;
+            toggle.checked = !!resp.uplink_en;
+            if (label) label.textContent = resp.uplink_en ? 'Enabled' : 'Disabled';
+            if (statusEl) { statusEl.style.display = 'inline'; setTimeout(function () { statusEl.style.display = 'none'; }, 2500); }
+            /* Enabling with an empty network list can't associate — say so
+               rather than leaving the operator waiting for a link. */
+            if (resp.uplink_en && !resp.networks) {
+              showToast('warning', 'No networks saved',
+                        'WiFi uplink is on but no network is configured. Add one under Network → WiFi.', 7000);
+            } else {
+              showToast('success', 'Saved',
+                        'WiFi uplink ' + (resp.uplink_en ? 'enabled' : 'disabled') + '.', 4000);
+            }
           })
           .catch(function (e) {
             saveBtn.disabled = false;

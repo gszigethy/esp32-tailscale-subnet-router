@@ -71,6 +71,9 @@ extern int connect_count;
 extern volatile uint8_t eth_route_en;
 extern volatile uint8_t sta_route_en;
 extern volatile uint8_t ap_route_en;
+extern volatile uint8_t sta_uplink_en;
+/* Owned by main.c — persists the switch and applies it to the radio live. */
+extern void sta_uplink_set(uint8_t enable);
 
 static const char *TAG = "web_ui";
 
@@ -270,6 +273,9 @@ static esp_err_t status_handler(httpd_req_t *req)
     /* STA (uplink) — SSID, IP, RSSI, MAC. */
     cJSON *sta = cJSON_CreateObject();
     cJSON_AddBoolToObject(sta, "connected", sta_connect != 0);
+    /* Lets the SPA distinguish "switched off" from "failed to associate" —
+     * an intentionally wired-only router must not render as a fault. */
+    cJSON_AddBoolToObject(sta, "uplink_en", sta_uplink_en != 0);
     wifi_ap_record_t apr;
     if (sta_connect && esp_wifi_sta_get_ap_info(&apr) == ESP_OK) {
         cJSON_AddStringToObject(sta, "ssid", (const char *)apr.ssid);
@@ -4641,6 +4647,44 @@ static const httpd_uri_t uri_ap_routing = {
     .uri = "/api/ap-routing", .method = HTTP_POST, .handler = ap_routing_handler,
 };
 
+/* POST /api/wifi-uplink — master switch for using WiFi STA as an uplink.
+ * Body: {"enabled": true|false}
+ * Off is the default for a fresh device: this is primarily a wired router and
+ * an idle STA would otherwise scan indefinitely on the radio the AP shares.
+ * Applied live so the operator doesn't need to reboot — enabling associates
+ * immediately (when networks are configured), disabling tears the link down. */
+static esp_err_t wifi_uplink_handler(httpd_req_t *req)
+{
+    if (require_auth(req) != ESP_OK) return ESP_FAIL;
+    char *buf = malloc_body_buf(512);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    if (recv_body(req, buf, 512, NULL) != ESP_OK) { free(buf); return ESP_FAIL; }
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON"); return ESP_FAIL; }
+
+    const cJSON *j_enabled = cJSON_GetObjectItem(root, "enabled");
+    if (cJSON_IsBool(j_enabled)) {
+        uint8_t en = cJSON_IsTrue(j_enabled) ? 1 : 0;
+        ESP_LOGI(TAG, "wifi-uplink %s", en ? "ON" : "OFF");
+        sta_uplink_set(en);
+    }
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject  (resp, "uplink_en", sta_uplink_en != 0);
+    cJSON_AddNumberToObject(resp, "networks",  wifi_networks_count());
+    char *s = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_sendstr(req, s ? s : "{}");
+    free(s);
+    return ret;
+}
+static const httpd_uri_t uri_wifi_uplink = {
+    .uri = "/api/wifi-uplink", .method = HTTP_POST, .handler = wifi_uplink_handler,
+};
+
 /* Wrapper with the URI-handler signature (no err code) so the same
  * redirect can be both a wildcard URI handler AND a 404 fallback.
  * Wildcard match avoids the "httpd_uri: URI ... not found" WARN
@@ -4740,6 +4784,7 @@ void web_ui_init(void)
     httpd_register_uri_handler(server, &uri_eth_routing);
     httpd_register_uri_handler(server, &uri_sta_routing);
     httpd_register_uri_handler(server, &uri_ap_routing);
+    httpd_register_uri_handler(server, &uri_wifi_uplink);
     ESP_LOGI(TAG, "web UI listening on :%d (HTTP)", conf.server_port);
     /* HTTPS redirect server gone with HTTPS itself — direct HTTP-on-80
      * is now the only listener, so nothing to redirect anywhere. */
