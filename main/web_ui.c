@@ -66,8 +66,8 @@
  * sta_connect is WiFi STA alone (not main.c's any-uplink ap_connect), so the
  * Status page's WiFi card doesn't claim "Connected" on an ETH-only box. The
  * wired side is reported separately from eth_uplink_connected(). */
-extern int sta_connect;
-extern int connect_count;
+extern volatile int sta_connect;
+extern volatile int connect_count;
 extern volatile uint8_t eth_route_en;
 extern volatile uint8_t sta_route_en;
 extern volatile uint8_t ap_route_en;
@@ -360,6 +360,11 @@ static esp_err_t status_handler(httpd_req_t *req)
                      eth_mac_bytes[3], eth_mac_bytes[4], eth_mac_bytes[5]);
             cJSON_AddStringToObject(eth, "mac", mac_str);
         }
+        /* Wire-byte counters — reported unconditionally (not only while
+         * connected) so a link that has since dropped still shows what it
+         * carried. Zero until netif_hooks_init() has hooked the ETH netif. */
+        cJSON_AddNumberToObject(eth, "bytes_in",  (double)netif_hooks_get_eth_bytes_in());
+        cJSON_AddNumberToObject(eth, "bytes_out", (double)netif_hooks_get_eth_bytes_out());
         /* Subnet routing toggle and last-detected CIDR for the Status card. */
         cJSON_AddBoolToObject(eth, "route_en", eth_route_en != 0);
         char *eth_cidr_nv = nvs_param_get_str("eth_route_cidr");
@@ -3893,10 +3898,39 @@ static void session_clear_all(void)
 
 /* Locate the slot a request's ts_session cookie points at. Returns
  * the index, or -1 if no cookie / no match / matched-but-expired. */
+/* Compare a candidate cookie value against a stored token without an early
+ * exit, so how long this takes doesn't reveal how many leading characters the
+ * caller guessed right. The tokens are 64 hex chars of esp_fill_random, so a
+ * timing oracle is the only realistic way to attack one — remote enough on a
+ * jittery embedded HTTP server, but the constant-time form costs nothing. */
+static bool token_equals(const char *candidate, const char *stored, size_t n)
+{
+    /* Bound the candidate first. `candidate` points into the Cookie header
+     * buffer, so indexing it at n unconditionally — as the previous
+     * strncmp-then-check-p[n] form did — reads past the buffer whenever
+     * "ts_session=" lands within n bytes of the end of a long header. */
+    size_t avail = strcspn(candidate, ";");
+    if (avail != n) return false;   /* length is not secret */
+    unsigned diff = 0;
+    for (size_t i = 0; i < n; i++) {
+        diff |= (unsigned)((unsigned char)candidate[i] ^ (unsigned char)stored[i]);
+    }
+    return diff == 0;
+}
+
 static int session_find_for_req(httpd_req_t *req)
 {
-    char hdr[160];
-    if (httpd_req_get_hdr_value_str(req, "Cookie", hdr, sizeof hdr) != ESP_OK) return -1;
+    /* Roomy enough for the whole Cookie header: 11 B of name + a 64-char
+     * token is 75 B, but the header also carries every other cookie the
+     * browser holds for this origin. At the old 160 B a request that merely
+     * accumulated a couple of unrelated cookies overflowed, and since
+     * truncation is reported as an error the operator was logged out with no
+     * indication why. Tolerate TRUNC now too — a truncated header may still
+     * contain a complete ts_session value, and if it doesn't the match simply
+     * fails as before. */
+    char hdr[512];
+    esp_err_t herr = httpd_req_get_hdr_value_str(req, "Cookie", hdr, sizeof hdr);
+    if (herr != ESP_OK && herr != ESP_ERR_HTTPD_RESULT_TRUNC) return -1;
     const char *p = strstr(hdr, "ts_session=");
     if (!p) return -1;
     p += strlen("ts_session=");
@@ -3904,9 +3938,7 @@ static int session_find_for_req(httpd_req_t *req)
     for (int i = 0; i < WEB_UI_SESSION_MAX; i++) {
         if (!s_sessions[i].token[0])    continue;
         if (now >= s_sessions[i].expires_us) continue;
-        size_t n = strlen(s_sessions[i].token);
-        if (strncmp(p, s_sessions[i].token, n) == 0
-            && (p[n] == '\0' || p[n] == ';')) {
+        if (token_equals(p, s_sessions[i].token, strlen(s_sessions[i].token))) {
             return i;
         }
     }
@@ -4685,10 +4717,51 @@ static const httpd_uri_t uri_wifi_uplink = {
     .uri = "/api/wifi-uplink", .method = HTTP_POST, .handler = wifi_uplink_handler,
 };
 
-/* Wrapper with the URI-handler signature (no err code) so the same
- * redirect can be both a wildcard URI handler AND a 404 fallback.
- * Wildcard match avoids the "httpd_uri: URI ... not found" WARN
- * spam the 404-only path used to emit. */
+/* GET /favicon.ico — the SPA declares an inline SVG icon, but browsers and
+ * bookmark/PWA paths still probe this URL, and with no handler each probe
+ * logged a "URI not found" WARN plus a 404. Serve the same icon (SVG is
+ * accepted here by every current browser) with a long cache lifetime so it is
+ * asked for once. Deliberately unauthenticated: it is a static decoration and
+ * the login overlay needs it before a session exists. */
+static const char FAVICON_SVG[] =
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
+    "<rect width='32' height='32' rx='7' fill='#161a1f'/>"
+    "<path d='M16 6.5c-4.3 0-7.9 1.3-7.9 1.3v3.1S11.7 9.6 16 9.6s7.9 1.3 7.9 "
+    "1.3V7.8S20.3 6.5 16 6.5zM8.1 13.6v3.1S11.7 15.4 16 15.4s7.9 1.3 7.9 "
+    "1.3v-3.1S20.3 12.3 16 12.3s-7.9 1.3-7.9 1.3zm5.9 5.6v6.3h4v-6.3h-4z' "
+    "fill='#4ade80'/></svg>";
+
+static esp_err_t favicon_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "image/svg+xml");
+    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=604800, immutable");
+    return httpd_resp_send(req, FAVICON_SVG, sizeof FAVICON_SVG - 1);
+}
+static const httpd_uri_t uri_favicon = {
+    .uri = "/favicon.ico", .method = HTTP_GET, .handler = favicon_handler,
+};
+
+/* Registration is fallible: esp_http_server refuses a handler once
+ * max_uri_handlers is full and returns ESP_ERR_HTTPD_HANDLERS_FULL. Every call
+ * site used to discard that, so the table filling up would silently drop
+ * whichever endpoints came last — those URLs would then 404 and the SPA would
+ * fail in a way that points nowhere near the cause. Log it loudly instead; the
+ * limit below is sized with headroom. */
+static void reg_uri(httpd_handle_t srv, const httpd_uri_t *u)
+{
+    esp_err_t err = httpd_register_uri_handler(srv, u);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "register %s failed: %s (raise conf.max_uri_handlers)",
+                 u->uri, esp_err_to_name(err));
+    }
+}
+
+/* Start the HTTP server and register every endpoint.
+ *
+ * Note on matching: conf.uri_match_fn is httpd_uri_match_wildcard, but that
+ * only widens patterns that themselves end in '*' — uri_index is the exact
+ * path "/", so there is no catch-all here and an unregistered path really does
+ * 404 (which is why /favicon.ico needed its own handler above). */
 void web_ui_init(void)
 {
     static httpd_handle_t server = NULL;
@@ -4714,7 +4787,11 @@ void web_ui_init(void)
      * instead of WebCrypto's ~100 ms. */
     httpd_config_t conf           = HTTPD_DEFAULT_CONFIG();
     conf.uri_match_fn             = httpd_uri_match_wildcard;
-    conf.max_uri_handlers         = 60;
+    /* Headroom, deliberately. 57 handlers are registered below and the old
+     * limit of 60 left room for two more before registrations would start
+     * failing silently (they now log — see reg_uri). Each unused slot is one
+     * pointer. */
+    conf.max_uri_handlers         = 80;
     conf.stack_size               = 12288;
     /* Without the mbedTLS context cost we can afford the bigger pool
      * the pre-HTTPS web server used. The SPA's first-paint opens 5-7
@@ -4728,63 +4805,64 @@ void web_ui_init(void)
         ESP_LOGE(TAG, "httpd_start failed");
         return;
     }
-    httpd_register_uri_handler(server, &uri_index);
-    httpd_register_uri_handler(server, &uri_status);
-    httpd_register_uri_handler(server, &uri_network);
-    httpd_register_uri_handler(server, &uri_network_save);
-    httpd_register_uri_handler(server, &uri_network_scan);
-    httpd_register_uri_handler(server, &uri_network_scan_result);
-    httpd_register_uri_handler(server, &uri_tools_route);
-    httpd_register_uri_handler(server, &uri_tools_ping);
-    httpd_register_uri_handler(server, &uri_tools_trace);
-    httpd_register_uri_handler(server, &uri_tools_nettest_get);
-    httpd_register_uri_handler(server, &uri_tools_nettest_post);
-    httpd_register_uri_handler(server, &uri_firewall);
-    httpd_register_uri_handler(server, &uri_firewall_add);
-    httpd_register_uri_handler(server, &uri_firewall_delete);
-    httpd_register_uri_handler(server, &uri_firewall_clear);
-    httpd_register_uri_handler(server, &uri_dhcp_reservations);
-    httpd_register_uri_handler(server, &uri_dhcp_reservations_save);
-    httpd_register_uri_handler(server, &uri_dhcp_leases);
-    httpd_register_uri_handler(server, &uri_dhcp_kick);
-    httpd_register_uri_handler(server, &uri_portmap);
-    httpd_register_uri_handler(server, &uri_portmap_save);
-    httpd_register_uri_handler(server, &uri_mac_deny);
-    httpd_register_uri_handler(server, &uri_mac_deny_save);
-    httpd_register_uri_handler(server, &uri_log_raw);
-    httpd_register_uri_handler(server, &uri_log_clear);
-    httpd_register_uri_handler(server, &uri_log_precrash);
-    httpd_register_uri_handler(server, &uri_log_precrash_clear);
-    httpd_register_uri_handler(server, &uri_tailscale);
-    httpd_register_uri_handler(server, &uri_tailscale_save);
-    httpd_register_uri_handler(server, &uri_tailscale_reset_identity);
-    httpd_register_uri_handler(server, &uri_system);
-    httpd_register_uri_handler(server, &uri_system_save);
-    httpd_register_uri_handler(server, &uri_system_restart);
-    httpd_register_uri_handler(server, &uri_system_factory_reset);
-    httpd_register_uri_handler(server, &uri_system_ota);
-    httpd_register_uri_handler(server, &uri_system_ota_poll);
-    httpd_register_uri_handler(server, &uri_system_ota_install);
-    httpd_register_uri_handler(server, &uri_system_secrets_get);
-    httpd_register_uri_handler(server, &uri_system_secrets_post);
-    httpd_register_uri_handler(server, &uri_system_diag);
-    httpd_register_uri_handler(server, &uri_system_debug_crash);
-    httpd_register_uri_handler(server, &uri_auth_status);
-    httpd_register_uri_handler(server, &uri_auth_login);
-    httpd_register_uri_handler(server, &uri_auth_logout);
-    httpd_register_uri_handler(server, &uri_auth_setup);
-    httpd_register_uri_handler(server, &uri_auth_change_password);
-    httpd_register_uri_handler(server, &uri_auth_clear_password);
-    httpd_register_uri_handler(server, &uri_sdlog_status_get);
-    httpd_register_uri_handler(server, &uri_sdlog_status_post);
-    httpd_register_uri_handler(server, &uri_sdlog_list);
-    httpd_register_uri_handler(server, &uri_sdlog_download);
-    httpd_register_uri_handler(server, &uri_sdlog_tail);
-    httpd_register_uri_handler(server, &uri_sdlog_erase);
-    httpd_register_uri_handler(server, &uri_eth_routing);
-    httpd_register_uri_handler(server, &uri_sta_routing);
-    httpd_register_uri_handler(server, &uri_ap_routing);
-    httpd_register_uri_handler(server, &uri_wifi_uplink);
+    reg_uri(server, &uri_index);
+    reg_uri(server, &uri_status);
+    reg_uri(server, &uri_network);
+    reg_uri(server, &uri_network_save);
+    reg_uri(server, &uri_network_scan);
+    reg_uri(server, &uri_network_scan_result);
+    reg_uri(server, &uri_tools_route);
+    reg_uri(server, &uri_tools_ping);
+    reg_uri(server, &uri_tools_trace);
+    reg_uri(server, &uri_tools_nettest_get);
+    reg_uri(server, &uri_tools_nettest_post);
+    reg_uri(server, &uri_firewall);
+    reg_uri(server, &uri_firewall_add);
+    reg_uri(server, &uri_firewall_delete);
+    reg_uri(server, &uri_firewall_clear);
+    reg_uri(server, &uri_dhcp_reservations);
+    reg_uri(server, &uri_dhcp_reservations_save);
+    reg_uri(server, &uri_dhcp_leases);
+    reg_uri(server, &uri_dhcp_kick);
+    reg_uri(server, &uri_portmap);
+    reg_uri(server, &uri_portmap_save);
+    reg_uri(server, &uri_mac_deny);
+    reg_uri(server, &uri_mac_deny_save);
+    reg_uri(server, &uri_log_raw);
+    reg_uri(server, &uri_log_clear);
+    reg_uri(server, &uri_log_precrash);
+    reg_uri(server, &uri_log_precrash_clear);
+    reg_uri(server, &uri_tailscale);
+    reg_uri(server, &uri_tailscale_save);
+    reg_uri(server, &uri_tailscale_reset_identity);
+    reg_uri(server, &uri_system);
+    reg_uri(server, &uri_system_save);
+    reg_uri(server, &uri_system_restart);
+    reg_uri(server, &uri_system_factory_reset);
+    reg_uri(server, &uri_system_ota);
+    reg_uri(server, &uri_system_ota_poll);
+    reg_uri(server, &uri_system_ota_install);
+    reg_uri(server, &uri_system_secrets_get);
+    reg_uri(server, &uri_system_secrets_post);
+    reg_uri(server, &uri_system_diag);
+    reg_uri(server, &uri_system_debug_crash);
+    reg_uri(server, &uri_auth_status);
+    reg_uri(server, &uri_auth_login);
+    reg_uri(server, &uri_auth_logout);
+    reg_uri(server, &uri_auth_setup);
+    reg_uri(server, &uri_auth_change_password);
+    reg_uri(server, &uri_auth_clear_password);
+    reg_uri(server, &uri_sdlog_status_get);
+    reg_uri(server, &uri_sdlog_status_post);
+    reg_uri(server, &uri_sdlog_list);
+    reg_uri(server, &uri_sdlog_download);
+    reg_uri(server, &uri_sdlog_tail);
+    reg_uri(server, &uri_sdlog_erase);
+    reg_uri(server, &uri_eth_routing);
+    reg_uri(server, &uri_sta_routing);
+    reg_uri(server, &uri_ap_routing);
+    reg_uri(server, &uri_wifi_uplink);
+    reg_uri(server, &uri_favicon);
     ESP_LOGI(TAG, "web UI listening on :%d (HTTP)", conf.server_port);
     /* HTTPS redirect server gone with HTTPS itself — direct HTTP-on-80
      * is now the only listener, so nothing to redirect anywhere. */
