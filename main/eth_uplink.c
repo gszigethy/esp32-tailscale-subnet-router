@@ -1,8 +1,10 @@
 /* W5500 Ethernet uplink driver.
  *
  * Initializes a WIZnet W5500 on SPI as the primary internet uplink.
- * Pin assignments default to the Seeed Studio XIAO W5500 Ethernet Adapter:
- *   CS=GPIO1  SCK=GPIO8  MISO=GPIO9  MOSI=GPIO10  INT=-1 (polling)
+ * Pin assignments default to the Seeed Studio XIAO W5500 Ethernet Adapter
+ * carried by a XIAO ESP32-S3. The adapter is labelled with XIAO "D" numbers,
+ * which are NOT GPIO numbers on this module:
+ *   D1/CS=GPIO2  D8/SCK=GPIO7  D9/MISO=GPIO8  D10/MOSI=GPIO9  INT=-1 (polling)
  * Override via Kconfig (CONFIG_ETH_W5500_*).
  *
  * This module only tracks hardware state (link up/down, DHCP IP/mask/GW).
@@ -22,6 +24,7 @@
 #include "esp_eth_netif_glue.h"
 #include "driver/spi_master.h"
 #include "esp_netif.h"
+#include "esp_mac.h"
 #include "nvs_params.h"
 
 static const char *TAG = "eth_uplink";
@@ -112,6 +115,13 @@ esp_netif_t *eth_uplink_init(void)
     eth_w5500_config_t w5500cfg = ETH_W5500_DEFAULT_CONFIG(
         (spi_host_device_t)CONFIG_ETH_W5500_SPI_HOST, &devcfg);
     w5500cfg.int_gpio_num = CONFIG_ETH_W5500_INT_GPIO;
+    /* esp_eth_mac_new_w5500 requires exactly one of interrupt or polling
+     * mode: (int_gpio_num >= 0) XOR (poll_period_ms > 0). Leaving the
+     * default poll_period_ms of 0 with INT at -1 satisfies neither and the
+     * config is rejected outright, so supply a period when INT is unwired. */
+    if (CONFIG_ETH_W5500_INT_GPIO < 0) {
+        w5500cfg.poll_period_ms = 10;
+    }
 
     /* MAC + PHY (both integrated in the W5500) ------------------------------ */
     eth_mac_config_t mac_cfg = ETH_MAC_DEFAULT_CONFIG();
@@ -120,13 +130,14 @@ esp_netif_t *eth_uplink_init(void)
 
     esp_eth_mac_t *mac = esp_eth_mac_new_w5500(&w5500cfg, &mac_cfg);
     if (!mac) {
-        ESP_LOGE(TAG, "esp_eth_mac_new_w5500 failed — W5500 not detected");
+        ESP_LOGE(TAG, "esp_eth_mac_new_w5500 failed — bad config or out of memory");
         spi_bus_free((spi_host_device_t)CONFIG_ETH_W5500_SPI_HOST);
         return NULL;
     }
     esp_eth_phy_t *phy = esp_eth_phy_new_w5500(&phy_cfg);
     if (!phy) {
         ESP_LOGE(TAG, "esp_eth_phy_new_w5500 failed");
+        mac->del(mac);
         spi_bus_free((spi_host_device_t)CONFIG_ETH_W5500_SPI_HOST);
         return NULL;
     }
@@ -135,8 +146,34 @@ esp_netif_t *eth_uplink_init(void)
     esp_eth_config_t eth_cfg = ETH_DEFAULT_CONFIG(mac, phy);
     esp_eth_handle_t eth_handle = NULL;
     err = esp_eth_driver_install(&eth_cfg, &eth_handle);
+    if (err == ESP_OK) {
+        /* The W5500 has no factory-burned MAC and neither the driver nor
+         * esp_eth_driver_install assigns one — the SHAR register keeps its
+         * all-zero reset value unless we write it. With a zero source MAC
+         * the PHY still links (the switch shows the port up) but every frame
+         * we send is dropped as invalid, so DHCP never completes and the
+         * device is unreachable. Push the ESP's designated Ethernet MAC in
+         * before esp_netif_attach, which copies it onto the netif. */
+        uint8_t eth_mac[6] = {0};
+        esp_err_t merr = esp_read_mac(eth_mac, ESP_MAC_ETH);
+        if (merr == ESP_OK) {
+            merr = esp_eth_ioctl(eth_handle, ETH_CMD_S_MAC_ADDR, eth_mac);
+        }
+        if (merr != ESP_OK) {
+            ESP_LOGE(TAG, "set MAC address failed: %s", esp_err_to_name(merr));
+        } else {
+            ESP_LOGI(TAG, "MAC %02x:%02x:%02x:%02x:%02x:%02x",
+                     eth_mac[0], eth_mac[1], eth_mac[2],
+                     eth_mac[3], eth_mac[4], eth_mac[5]);
+        }
+    }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_eth_driver_install: %s", esp_err_to_name(err));
+        /* The MAC owns the SPI device handle, so it must be deleted before
+         * the bus — otherwise spi_bus_free reports "not all CSses freed"
+         * and the device leaks. Same for every path below. */
+        phy->del(phy);
+        mac->del(mac);
         spi_bus_free((spi_host_device_t)CONFIG_ETH_W5500_SPI_HOST);
         return NULL;
     }
@@ -147,13 +184,37 @@ esp_netif_t *eth_uplink_init(void)
     if (!netif) {
         ESP_LOGE(TAG, "esp_netif_new failed");
         esp_eth_driver_uninstall(eth_handle);
+        phy->del(phy);
+        mac->del(mac);
         spi_bus_free((spi_host_device_t)CONFIG_ETH_W5500_SPI_HOST);
         return NULL;
     }
 
-    /* Glue driver to netif */
+    /* Glue driver to netif. Both calls must be checked: without the glue
+     * attached the netif never sees ETHERNET_EVENT_CONNECTED, so it stays
+     * down and the DHCP client never starts — while esp_eth_start() below
+     * still succeeds. That failure mode looks exactly like a dead cable. */
     esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(eth_handle);
-    esp_netif_attach(netif, glue);
+    if (!glue) {
+        ESP_LOGE(TAG, "esp_eth_new_netif_glue failed");
+        esp_netif_destroy(netif);
+        esp_eth_driver_uninstall(eth_handle);
+        phy->del(phy);
+        mac->del(mac);
+        spi_bus_free((spi_host_device_t)CONFIG_ETH_W5500_SPI_HOST);
+        return NULL;
+    }
+    err = esp_netif_attach(netif, glue);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_netif_attach: %s", esp_err_to_name(err));
+        esp_eth_del_netif_glue(glue);
+        esp_netif_destroy(netif);
+        esp_eth_driver_uninstall(eth_handle);
+        phy->del(phy);
+        mac->del(mac);
+        spi_bus_free((spi_host_device_t)CONFIG_ETH_W5500_SPI_HOST);
+        return NULL;
+    }
 
     /* Propagate device-wide hostname into DHCP Option 12 */
     char *hostname = nvs_param_get_str("hostname");
@@ -176,6 +237,8 @@ esp_netif_t *eth_uplink_init(void)
         ESP_LOGE(TAG, "esp_eth_start: %s", esp_err_to_name(err));
         esp_netif_destroy(netif);
         esp_eth_driver_uninstall(eth_handle);
+        phy->del(phy);
+        mac->del(mac);
         spi_bus_free((spi_host_device_t)CONFIG_ETH_W5500_SPI_HOST);
         return NULL;
     }

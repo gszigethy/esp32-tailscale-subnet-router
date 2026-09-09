@@ -11,38 +11,42 @@ menu "W5500 Ethernet Uplink"
 
     config ETH_W5500_CS_GPIO
         int "W5500 CS (chip select) GPIO"
-        default 1
+        default 2
         depends on ETH_W5500_ENABLED
         help
-            SPI chip-select pin. XIAO W5500 adapter default: GPIO1 (D1).
+            SPI chip-select pin. XIAO W5500 adapter uses D1, which on the
+            XIAO ESP32-S3 is GPIO2 (the D-number is NOT the GPIO number).
 
     config ETH_W5500_SCK_GPIO
         int "W5500 SCK GPIO"
-        default 8
+        default 7
         depends on ETH_W5500_ENABLED
         help
-            SPI clock pin. XIAO W5500 adapter default: GPIO8 (D8/SCK).
+            SPI clock pin. XIAO W5500 adapter uses D8/SCK, which on the
+            XIAO ESP32-S3 is GPIO7.
 
     config ETH_W5500_MISO_GPIO
         int "W5500 MISO GPIO"
-        default 9
+        default 8
         depends on ETH_W5500_ENABLED
         help
-            SPI MISO pin. XIAO W5500 adapter default: GPIO9 (D9/MISO).
+            SPI MISO pin. XIAO W5500 adapter uses D9/MISO, which on the
+            XIAO ESP32-S3 is GPIO8.
 
     config ETH_W5500_MOSI_GPIO
         int "W5500 MOSI GPIO"
-        default 10
+        default 9
         depends on ETH_W5500_ENABLED
         help
-            SPI MOSI pin. XIAO W5500 adapter default: GPIO10 (D10/MOSI).
+            SPI MOSI pin. XIAO W5500 adapter uses D10/MOSI, which on the
+            XIAO ESP32-S3 is GPIO9.
 
     config ETH_W5500_INT_GPIO
         int "W5500 INT GPIO (-1 = polling)"
         default -1
         depends on ETH_W5500_ENABLED
         help
-            Interrupt GPIO for receive notification. -1 uses 100 ms polling
+            Interrupt GPIO for receive notification. -1 uses 10 ms polling
             instead, which is reliable and avoids wiring an extra pin.
             XIAO W5500 adapter exposes this on GPIO16 (D16) if you want it.
 
@@ -51,8 +55,8 @@ menu "W5500 Ethernet Uplink"
         default 1
         depends on ETH_W5500_ENABLED
         help
-            SPI peripheral to use. GPIO8/9/10 are the SPI2 pins on ESP32-S3,
-            so 1 (SPI2_HOST) is correct for the XIAO W5500 adapter.
+            SPI peripheral to use. 1 (SPI2_HOST) is correct for the XIAO
+            W5500 adapter; SPI2 can be routed to any GPIO via the GPIO matrix.
 
     config ETH_W5500_SPI_CLOCK_MHZ
         int "W5500 SPI clock speed (MHz)"
