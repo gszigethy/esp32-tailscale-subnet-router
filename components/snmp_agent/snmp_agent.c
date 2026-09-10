@@ -52,6 +52,7 @@
 #include "lwip/netif.h"
 #include "lwip/pbuf.h"
 #include "lwip/ip4_addr.h"
+#include "lwip/tcpip.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <string.h>
@@ -213,8 +214,10 @@ static void hook_netif(int slot, struct netif *n)
  * telemetry tick, so hooks land as soon as each netif exists.            */
 static struct netif *find_ts_netif(void);
 
-static void install_traffic_hooks(void)
+/* Runs in the lwIP TCP/IP thread — see install_traffic_hooks(). */
+static void install_traffic_hooks_cb(void *ctx)
 {
+    (void)ctx;
     esp_netif_t *e = esp_netif_get_handle_from_ifkey("ETH_DEF");
     if (e) hook_netif(IF_ETH, (struct netif *)esp_netif_get_netif_impl(e));
 
@@ -222,6 +225,23 @@ static void install_traffic_hooks(void)
     if (w) hook_netif(IF_WIFI, (struct netif *)esp_netif_get_netif_impl(w));
 
     hook_netif(IF_TS, find_ts_netif());
+}
+
+/* netif_list and the netif function pointers belong to the lwIP thread, and
+ * CONFIG_LWIP_TCPIP_CORE_LOCKING is off in this build — so walking the list
+ * and swapping pointers from the telemetry timer was a race: the tunnel netif
+ * can be removed and freed between find_ts_netif() returning it and the hook
+ * being written into it, which is a write to freed memory on a reconnect that
+ * lands in that window. Run the whole scan inside the TCP/IP thread instead,
+ * the same idiom microlink uses for its own netif bring-up.
+ *
+ * Non-blocking on purpose: this is called from an esp_timer callback, which
+ * must not block. If the mailbox is full the install is simply skipped and
+ * the next tick retries — hook_netif() is idempotent, so nothing is lost but
+ * five seconds of counting on an interface that just appeared. */
+static void install_traffic_hooks(void)
+{
+    tcpip_callback_with_block(install_traffic_hooks_cb, NULL, 0);
 }
 
 /* ------------------------------------------------------------------ */

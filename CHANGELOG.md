@@ -6,6 +6,20 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.26-W5500] — 2026-09-10
+
+Upstream 0.1.26 merged in — a submodule bump and nothing else, so this is a small one — plus a thread-safety fix in the SNMP traffic hooks that reviewing upstream's teardown work brought to light. Device-tested on the bench router: full SNMP walk over the wire, wired uplink and tunnel counters both tracking, die temperature reading, hooks re-arming after the tunnel comes up.
+
+### Fixed
+- **Every reconnect still leaked ~15 KB of PSRAM** (microlink `4843ab0` → `70cfeba`, upstream 0.1.26). The lwIP `struct wireguard_device` behind the tunnel netif — every peer's keypairs and handshake state, ~14.7 KB — was never freed: teardown released only the 260-byte netif wrapped around it. It is now freed on stop with the key material zeroed first, and packets or peer updates still queued at destroy are freed with it.
+- **The SNMP traffic hooks walked lwIP's netif list from the wrong thread.** `CONFIG_LWIP_TCPIP_CORE_LOCKING` is off in this build, so `netif_list` and the netif function pointers may only be touched from the TCP/IP thread. The five-second telemetry tick did it from the esp_timer task, which left a window where the tunnel netif could be removed and freed between `find_ts_netif()` returning it and the hook being written into it — a write to freed memory on a reconnect landing in exactly that window. The scan now runs inside the TCP/IP thread via `tcpip_callback_with_block()`, the same idiom microlink uses for its own netif bring-up, and non-blocking because an esp_timer callback must not block: a full mailbox just means the next tick retries, and the install is idempotent.
+
+## [0.1.26] — 2026-09-10
+
+One fix: the residual per-reconnect PSRAM leak left after 0.1.25. Device-tested before tagging: manual OTA, five bursts of three connect requests and three single reconnects with no reset and a flat heap, six peers direct, an AP client through the router, the exit node via a relay and back.
+
+### Fixed
+- **Every reconnect still leaked ~15 KB of PSRAM** (microlink). After the 650 KB fix each stop/start cycle lost a further 14.6–15.2 KB: the lwIP WireGuard device (`struct wireguard_device`, 14 664 bytes on this build — every peer's keypairs and handshake state) was never freed. `wireguardif_shutdown()` only cancels its timer, and the teardown freed the 260-byte netif around the device and nothing else. The device is now released on stop, key material zeroed first, and packets or peer updates still queued when the instance is destroyed are freed with it. Seven reconnects on the reference router: −656 B net (−94 B per cycle, noise), previously −14.6 KB each.
 ## [0.1.25-W5500] — 2026-09-10
 
 Upstream 0.1.24 and 0.1.25 merged into the fork, on top of the W5500 Ethernet uplink and the SNMP agent. Device-tested on the bench router before tagging: full SNMP walk over the wire (82 OIDs, clean termination), wired uplink counting traffic, the tunnel up and answering pings with `ts0` counters matching packet-for-packet, and the die temperature reading through both the SNMP and web-UI paths.
