@@ -1,0 +1,45 @@
+
+# ESP-IDF's own internal EMAC driver places its RX/TX hot path in IRAM
+# (see components/esp_eth/linker.lf, gated behind CONFIG_ETH_IRAM_OPTIMIZATION)
+# precisely because a flash write/erase disables the flash cache on both
+# cores for the duration of the operation: any code or rodata still
+# mapped through flash — not IRAM/DRAM — is unreachable while that
+# critical section runs, and touching it manifests as a garbage/zero
+# read or an instruction-fetch fault.
+#
+# The W5500 SPI Ethernet driver (components/esp_eth/src/spi/w5500/
+# esp_eth_mac_w5500.c) never got the same treatment — there is no
+# CONFIG_ETH_IRAM_OPTIMIZATION equivalent for the SPI-based MACs, only
+# for CONFIG_ETH_USE_ESP32_EMAC. On this board, ETH is the WAN uplink,
+# so its RX task (w5500_tsk) is continuously polling the SPI bus for
+# inbound traffic — including an OTA firmware download in progress.
+# esp_ota's writes to the OTA partition disable the flash cache exactly
+# as often as the driver's flash-mapped RX path is running, so a real
+# OTA update reliably (not just occasionally) hits the collision:
+# w5500_tsk panics with EXCCAUSE=LoadProhibited, EXCVADDR=0, deep inside
+# a ROM bulk-copy called from the driver's SPI transaction code —
+# exactly the class of bug CONFIG_ETH_IRAM_OPTIMIZATION exists to
+# prevent for the internal EMAC.
+#
+# Mirror that fix here for the W5500 driver's own hot path — the SPI
+# register/buffer transfer primitives plus the RX task and everything
+# it calls — so it stays IRAM-resident and safely reachable across a
+# concurrent internal flash write.
+[mapping:w5500_iram]
+archive: libesp_eth.a
+entries:
+    esp_eth_mac_w5500:w5500_spi_write (noflash_text)
+    esp_eth_mac_w5500:w5500_spi_read (noflash_text)
+    esp_eth_mac_w5500:w5500_read (noflash_text)
+    esp_eth_mac_w5500:w5500_write (noflash_text)
+    esp_eth_mac_w5500:w5500_send_command (noflash_text)
+    esp_eth_mac_w5500:w5500_get_rx_received_size (noflash_text)
+    esp_eth_mac_w5500:w5500_get_tx_free_size (noflash_text)
+    esp_eth_mac_w5500:w5500_write_buffer (noflash_text)
+    esp_eth_mac_w5500:w5500_read_buffer (noflash_text)
+    esp_eth_mac_w5500:emac_w5500_transmit (noflash_text)
+    esp_eth_mac_w5500:emac_w5500_alloc_recv_buf (noflash_text)
+    esp_eth_mac_w5500:emac_w5500_receive (noflash_text)
+    esp_eth_mac_w5500:emac_w5500_flush_recv_frame (noflash_text)
+    esp_eth_mac_w5500:emac_w5500_task (noflash_text)
+    esp_eth_mac_w5500:w5500_poll_timer (noflash_text)

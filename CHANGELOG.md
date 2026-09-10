@@ -6,6 +6,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.20-W5500.1] — 2026-09-10
+
+### Fixed
+- **OTA update reliably crashed the W5500 driver task (`w5500_tsk`) mid-download.** ESP32-S3 flash writes disable the flash cache on both cores for the duration of each write/erase; ESP-IDF's own internal EMAC driver places its RX/TX hot path in IRAM to stay safely reachable through that window (`CONFIG_ETH_IRAM_OPTIMIZATION`), but the bundled W5500 SPI driver never got the same treatment — there's no equivalent option for SPI-based MACs. Since ETH is this board's uplink, `w5500_tsk` is continuously polling the SPI bus for inbound traffic *including the OTA download itself*, so it collided with `esp_ota`'s flash writes on effectively every attempt: `EXCCAUSE=LoadProhibited`, `EXCVADDR=0`, deep in a ROM bulk-copy called from the driver's SPI transaction code. Added a linker fragment (`main/linker.lf`) that maps the W5500 driver's SPI transfer primitives and RX/TX path into IRAM, mirroring what ESP-IDF does for its own EMAC.
+
 ## [0.1.20-W5500] — 2026-09-10
 
 Merges upstream [v0.1.20](https://github.com/Csontikka/esp32-tailscale-subnet-router/releases/tag/v0.1.20)
@@ -333,7 +338,8 @@ from a built-in web UI.
 - **Headscale is untested**; only hosted Tailscale has been validated.
 - Tailnet lock is unsupported.
 
-[Unreleased]: https://github.com/gszigethy/esp32-tailscale-subnet-router/compare/v0.1.20-W5500...HEAD
+[Unreleased]: https://github.com/gszigethy/esp32-tailscale-subnet-router/compare/v0.1.20-W5500.1...HEAD
+[0.1.20-W5500.1]: https://github.com/gszigethy/esp32-tailscale-subnet-router/releases/tag/v0.1.20-W5500.1
 [0.1.20-W5500]: https://github.com/gszigethy/esp32-tailscale-subnet-router/releases/tag/v0.1.20-W5500
 [0.1.19-W5500]: https://github.com/gszigethy/esp32-tailscale-subnet-router/releases/tag/v0.1.19-W5500
 [0.1.9]: https://github.com/Csontikka/esp32-tailscale-subnet-router/releases/tag/v0.1.9
