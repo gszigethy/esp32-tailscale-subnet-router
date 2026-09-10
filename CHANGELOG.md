@@ -6,6 +6,35 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.23] — 2026-09-10
+
+One microlink fix, found while checking the renewed admin-API token: the *Client version* setting added in 0.1.20 did not actually stick. Device-tested before tagging: manual OTA, the version visible in the admin console with the setting on and gone again with it cleared, six peers direct.
+
+### Fixed
+- **The admin console lost the client version after every reconnect.** `Hostinfo.IPNVersion` was only put into two of the four Hostinfo messages microlink sends (register, initial map); the long-poll MapRequest and the endpoint update carried a Hostinfo without it, and the control plane keeps the last Hostinfo it receives — so the value set under *Client version* showed up for a moment after registration and vanished with the first endpoint update, re-arming the console's "Device is too old" gate. All four now carry it.
+
+## [0.1.22] — 2026-09-10
+
+Two fixes from a morning of measuring the reference router: the exit-node download black-hole that had been on the list since the first exit-node tests, and two more places where microlink talked more than the reference client does. Device-tested before tagging: manual OTA, exit node via a peer with eight bulk downloads, an AP client through the router, six peers direct.
+
+### Changed
+- **Endpoint updates reach the control plane only when the endpoints changed** (microlink; reference client: `setEndpoints` gates the update with `endpointSetsEqual`). The 23 s re-STUN used to re-send an identical update every time — a fresh HTTP/2 stream for the node and a peer-change patch pushed to every peer on the tailnet — with nothing new in it. Still sent once per (re)connect.
+- **One PONG per PING, back to where it came from** (microlink; reference client: `handlePingLocked`). The fan-out — the source, every LAN endpoint of the peer, plus always a copy via DERP — cost the pinger an unmatched PONG per extra copy and a DERP round trip per PING for nothing. DERP is used only when the direct send itself fails.
+
+### Fixed
+- **Exit-node bulk downloads no longer black-hole.** With an exit node on a direct UDP path the automatic tunnel MTU was 1420, so AP clients were MSS-clamped to 1380 and servers sent 1368-byte segments — which the exit node cannot forward into its own tunnel (every Tailscale peer's tun device is 1280). The exit node answered with ICMP "fragmentation needed"; servers that honour it recovered, servers that ignore it retransmitted the same oversized segment until the client gave up: measured through the reference router, one 5 MB download in four never delivered a byte in 90 s, deterministically per server. Auto MTU is now 1280 unconditionally (the Tailscale tunnel MTU, direct or relayed alike), so the MSS clamp is 1240 and nothing on the return path ever needs fragmenting. The *Fixed* MTU mode is unchanged.
+
+## [0.1.21] — 2026-09-10
+
+microlink brought up to the esphome-tailscale line again ([esphome-tailscale#46](https://github.com/Csontikka/esphome-tailscale/issues/46), the protocol direction): the DISCO manager backs off the way `tailscaled` does, the per-packet crypto cost is gone, and a dual-homed peer no longer re-handshakes every 3 s. Device-tested on the reference router before tagging: manual OTA, exit node via a peer, an AP client through the router, six peers direct in every phase, and the night's soak on this code.
+
+### Changed
+- **DISCO probing backs off the way `tailscaled` does.** A CallMeMaybe is no longer answered with a CallMeMaybe — the reference client never does that; the echo kept two microlink nodes without a WireGuard session bouncing CallMeMaybe → ping burst → CallMeMaybe indefinitely, the storm behind esphome-tailscale#46. The 3 s heartbeat runs only behind a live WireGuard session (a session-less peer is re-probed once a minute); peers the netmap marks offline get neither the 15 s upgrade probe nor the 30 s DERP handshake retry; CallMeMaybe-triggered bursts are spaced at least 2.5 s apart per peer. On this router (13 peers, 8 of them offline) the probes to offline peers alone had kept every 1 s manager tick above its 30 ms `SLOW` mark.
+- **One X25519 per peer, not per DISCO packet.** Every DISCO ping, pong and CallMeMaybe — sent or received — recomputed the NaCl box shared secret, ~16 ms each on an ESP32-S3. It is now derived once per peer and cached (reference `discoInfo.sharedKey`), and packets from an unknown disco key are dropped before any crypto. `disco_periodic_probes SLOW` warnings on the reference router: 46–62 per minute → 0.
+
+### Fixed
+- **A dual-homed peer no longer forces a WireGuard handshake every 3 s.** A peer reachable both on its LAN address and through a NAT port-forward had DISCO's best path on one address while its WireGuard packets arrived from the other; wireguardif roamed the endpoint back on every reply, the next heartbeat "switched" it again and, with no recent data, forced a handshake — one per 3 s, indefinitely (13 switches per 45 s measured with the console at INFO). The best is now kept while it answered within the last 6.5 s (`trustUDPAddrDuration`), and an endpoint change never forces a handshake: WireGuard authenticates by key and roams by design. After the fix: 0 switches, only the normal 120 s rekeys remain.
+
 ## [0.1.20-W5500.1] — 2026-09-10
 
 ### Fixed
@@ -338,7 +367,10 @@ from a built-in web UI.
 - **Headscale is untested**; only hosted Tailscale has been validated.
 - Tailnet lock is unsupported.
 
-[Unreleased]: https://github.com/gszigethy/esp32-tailscale-subnet-router/compare/v0.1.20-W5500.1...HEAD
+[Unreleased]: https://github.com/gszigethy/esp32-tailscale-subnet-router/compare/v0.1.23-W5500...HEAD
+[0.1.23]: https://github.com/Csontikka/esp32-tailscale-subnet-router/releases/tag/v0.1.23
+[0.1.22]: https://github.com/Csontikka/esp32-tailscale-subnet-router/releases/tag/v0.1.22
+[0.1.21]: https://github.com/Csontikka/esp32-tailscale-subnet-router/releases/tag/v0.1.21
 [0.1.20-W5500.1]: https://github.com/gszigethy/esp32-tailscale-subnet-router/releases/tag/v0.1.20-W5500.1
 [0.1.20-W5500]: https://github.com/gszigethy/esp32-tailscale-subnet-router/releases/tag/v0.1.20-W5500
 [0.1.19-W5500]: https://github.com/gszigethy/esp32-tailscale-subnet-router/releases/tag/v0.1.19-W5500
