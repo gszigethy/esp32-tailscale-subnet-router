@@ -119,10 +119,13 @@ static uint32_t s_prev_idle0_us   = 0;
 static uint32_t s_prev_idle1_us   = 0;
 static uint64_t s_prev_wall_us    = 0;
 
-/* MAC cache for eth0 and wlan0. */
+/* MAC cache for eth0 and wlan0. Latched independently: a build with no
+ * Ethernet never resolves ETH_DEF, and a shared flag would keep the wlan0
+ * MAC re-reading on every query for the rest of the uptime. */
 static uint8_t s_eth_mac[6];
 static uint8_t s_wifi_mac[6];
-static bool    s_macs_fetched = false;
+static bool    s_eth_mac_fetched  = false;
+static bool    s_wifi_mac_fetched = false;
 
 /* ------------------------------------------------------------------ */
 /* Traffic hooks                                                       */
@@ -319,16 +322,19 @@ static struct netif *find_ts_netif(void)
 /* ------------------------------------------------------------------ */
 static void ensure_macs(void)
 {
-    if (s_macs_fetched) return;
-    bool got_eth = false, got_sta = false;
-    esp_netif_t *eth = esp_netif_get_handle_from_ifkey("ETH_DEF");
-    if (eth) got_eth = (esp_netif_get_mac(eth, s_eth_mac) == ESP_OK);
-    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    if (sta) got_sta = (esp_netif_get_mac(sta, s_wifi_mac) == ESP_OK);
-    /* Only latch once both are real. A query that arrives before the
-     * interfaces are up would otherwise cache 00:00:00:00:00:00 for the
-     * rest of the uptime. */
-    s_macs_fetched = got_eth && got_sta;
+    /* Latch each side only once its address is real, so a query that arrives
+     * before the interfaces are up doesn't cache 00:00:00:00:00:00 for the
+     * rest of the uptime. An interface the build doesn't have simply never
+     * latches and keeps reporting the all-zero address, which is what
+     * ifPhysAddress should say for an interface that isn't there. */
+    if (!s_eth_mac_fetched) {
+        esp_netif_t *eth = esp_netif_get_handle_from_ifkey("ETH_DEF");
+        if (eth) s_eth_mac_fetched = (esp_netif_get_mac(eth, s_eth_mac) == ESP_OK);
+    }
+    if (!s_wifi_mac_fetched) {
+        esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        if (sta) s_wifi_mac_fetched = (esp_netif_get_mac(sta, s_wifi_mac) == ESP_OK);
+    }
 }
 
 /* ------------------------------------------------------------------ */
