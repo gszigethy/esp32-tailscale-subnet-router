@@ -564,11 +564,19 @@ static val_t g_ts_tx_pkts(void)     { return (val_t){ .u = s_traf[IF_TS].tx_pkts
 static val_t g_heap_minfree(void) { return (val_t){ .u = (uint32_t)esp_get_minimum_free_heap_size() }; }
 
 /* --- shared by entPhySensorValue --- */
+bool snmp_agent_chip_temp_c(float *out_c)
+{
+    if (!s_temp_sensor || !out_c) return false;
+    float c = 0.0f;
+    if (temperature_sensor_get_celsius(s_temp_sensor, &c) != ESP_OK) return false;
+    *out_c = c;
+    return true;
+}
+
 static val_t g_temperature(void)
 {
-    if (!s_temp_sensor) return (val_t){ .i = -9999 };
     float c = 0.0f;
-    temperature_sensor_get_celsius(s_temp_sensor, &c);
+    if (!snmp_agent_chip_temp_c(&c)) return (val_t){ .i = -9999 };
     return (val_t){ .i = (int32_t)(c * 10.0f) };
 }
 

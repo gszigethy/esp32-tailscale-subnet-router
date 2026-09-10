@@ -1764,23 +1764,6 @@
               <span class="stat-label">Traffic</span>
               <span class="stat-value mono" id="ap-traffic">—</span>
             </div>
-            <div class="stat-row">
-              <span class="stat-label">Subnet routing</span>
-              <span class="stat-value flex items-center gap-2">
-                <span class="badge badge-neutral" id="ap-route-badge">—</span>
-                <span class="mono" id="ap-route-cidr" style="font-size:0.85rem;"></span>
-              </span>
-            </div>
-            <div class="stat-row" style="padding-top:0.5rem; border-top:1px solid var(--border);">
-              <span class="stat-label" style="align-self:center;">Advertise AP</span>
-              <span class="stat-value flex items-center gap-2">
-                <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer; margin:0;">
-                  <input type="checkbox" id="ap-route-en-toggle">
-                </label>
-                <button class="btn btn-sm btn-primary" id="ap-route-save" style="padding:0.2rem 0.6rem; font-size:0.8rem;">Save</button>
-                <span id="ap-route-status" style="font-size:0.8rem; color:var(--success); display:none;">Saved</span>
-              </span>
-            </div>
           </div>
         </div>
 
@@ -2273,9 +2256,16 @@
           </div>
 
           <div class="form-group">
-            <label class="form-label" for="ts-routes">Advertised Subnet Routes</label>
-            <textarea class="textarea input" id="ts-routes" placeholder="192.168.4.0/24" style="min-height:5rem; font-family:var(--font-mono); font-size:0.9rem;"></textarea>
-            <span class="form-hint">One CIDR per line.</span>
+            <label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer;">
+              <input type="checkbox" id="ts-adv-ap" checked> Advertise the AP subnet
+            </label>
+            <span class="form-hint">On by default. The AP subnet (currently <span id="ts-adv-ap-cidr" class="mono">…</span>, from the AP settings) is announced as a subnet route and follows the AP settings automatically; peers can use it once you approve it in the admin console. Turn off to announce only the routes listed below.</span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="ts-routes">Additional advertised subnet routes</label>
+            <textarea class="textarea input" id="ts-routes" placeholder="192.168.1.0/24" style="min-height:5rem; font-family:var(--font-mono); font-size:0.9rem;"></textarea>
+            <span class="form-hint">One CIDR per line, on top of the AP subnet above — e.g. the uplink LAN (see Source-NAT below).</span>
           </div>
 
           <div class="form-group">
@@ -3534,23 +3524,6 @@
       apClientsBadge.className = (typeof ap.clients === 'number' && ap.clients > 0) ? 'badge badge-success' : 'badge badge-neutral';
 
       // AP subnet routing state
-      var apRouteBadge  = document.getElementById('ap-route-badge');
-      var apRouteCidrEl = document.getElementById('ap-route-cidr');
-      var apRouteToggle = document.getElementById('ap-route-en-toggle');
-      if (apRouteBadge) {
-        if (ap.route_en) {
-          apRouteBadge.className = 'badge badge-success';
-          apRouteBadge.textContent = 'On';
-          if (apRouteCidrEl) apRouteCidrEl.textContent = ap.route_cidr || '(detecting…)';
-        } else {
-          apRouteBadge.className = 'badge badge-neutral';
-          apRouteBadge.textContent = 'Off';
-          if (apRouteCidrEl) apRouteCidrEl.textContent = '';
-        }
-        if (apRouteToggle && !apRouteToggle._touched) {
-          apRouteToggle.checked = !!ap.route_en;
-        }
-      }
 
       /* System tile — internal DRAM + SPIRAM bars, CPU load %, CPU temp.
        * Backend reports mem_internal_free/total, mem_spiram_free/total,
@@ -5534,6 +5507,11 @@
           document.getElementById('ts-max-peers').value     = s.max_peers   || 16;
           document.getElementById('ts-accept-routes').checked = !!s.accept_routes;
           document.getElementById('ts-lan-bypass').checked    = !!s.lan_bypass;
+          document.getElementById('ts-adv-ap').checked        = (s.advertise_ap !== false);
+          (function () {
+            var eff = (s.effective_routes || '').split('\n')[0];
+            document.getElementById('ts-adv-ap-cidr').textContent = (s.advertise_ap !== false && eff) ? eff : '—';
+          })();
           document.getElementById('ts-snat').checked          = !!s.snat_subnet_routes;
 
           /* Exit-node picker — populated from peers that advertise 0/0. */
@@ -5699,7 +5677,7 @@
 
     /* Dirty-track and wiring. */
     ['ts_enabled_on', 'ts_enabled_off', 'ts-auth-key', 'ts-hostname', 'ts-login', 'ts-ipn-version',
-     'ts-routes', 'ts-max-peers', 'ts-accept-routes', 'ts-lan-bypass', 'ts-snat', 'ts-exit-node'
+     'ts-adv-ap', 'ts-routes', 'ts-max-peers', 'ts-accept-routes', 'ts-lan-bypass', 'ts-snat', 'ts-exit-node'
     ].forEach(function (id) {
       var el = document.getElementById(id);
       var ev = (el.tagName === 'SELECT' || el.type === 'checkbox' || el.type === 'radio')
@@ -5833,6 +5811,7 @@
           max_peers:         parseInt(document.getElementById('ts-max-peers').value, 10) || 16,
           accept_routes:     document.getElementById('ts-accept-routes').checked,
           lan_bypass:        document.getElementById('ts-lan-bypass').checked,
+          advertise_ap:      document.getElementById('ts-adv-ap').checked,
           snat_subnet_routes: document.getElementById('ts-snat').checked,
           exit_node_ip:      document.getElementById('ts-exit-node').value
         }
@@ -6017,40 +5996,6 @@
     })();
 
     // AP subnet routing toggle — Status card Save button
-    (function () {
-      var toggle = document.getElementById('ap-route-en-toggle');
-      var saveBtn = document.getElementById('ap-route-save');
-      var statusEl = document.getElementById('ap-route-status');
-      if (!toggle || !saveBtn) return;
-      toggle.addEventListener('change', function () { toggle._touched = true; });
-      saveBtn.addEventListener('click', function () {
-        var enabled = toggle.checked;
-        saveBtn.disabled = true;
-        saveBtn.textContent = '…';
-        apiFetch('/api/ap-routing', {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ enabled: enabled })
-        })
-          .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-          .then(function (resp) {
-            saveBtn.disabled = false;
-            saveBtn.textContent = 'Save';
-            toggle._touched = false;
-            var rb = document.getElementById('ap-route-badge');
-            var rc = document.getElementById('ap-route-cidr');
-            if (rb) { rb.className = resp.route_en ? 'badge badge-success' : 'badge badge-neutral'; rb.textContent = resp.route_en ? 'On' : 'Off'; }
-            if (rc) rc.textContent = resp.route_en ? (resp.route_cidr || '(detecting…)') : '';
-            if (statusEl) { statusEl.style.display = 'inline'; setTimeout(function () { statusEl.style.display = 'none'; }, 2500); }
-            showToast('success', 'Saved', 'AP subnet routing ' + (enabled ? 'enabled' : 'disabled') + '.', 4000);
-          })
-          .catch(function (e) {
-            saveBtn.disabled = false;
-            saveBtn.textContent = 'Save';
-            showToast('error', 'Save failed', e && e.message ? e.message : 'unknown error', 6000);
-          });
-      });
-    })();
 
     // =====================================================================
     // FIREWALL PAGE

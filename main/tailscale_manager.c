@@ -7,6 +7,7 @@
  * struct; no internal NVS bridging needed.
  */
 
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
@@ -23,6 +24,7 @@
 #include "esp_sntp.h"
 #include "esp_netif.h"
 #include "lwip/ip_addr.h"
+#include "lwip/ip4_addr.h"
 
 /* Local helper: load a string from NVS, defaulting to an empty heap
  * buffer when the key isn't there. Other modules assume non-NULL. */
@@ -40,6 +42,7 @@ char* tailscale_hostname = NULL;
 char* tailscale_login_server = NULL;
 char* tailscale_ipn_version = NULL;
 char* tailscale_advertise_routes = NULL;
+int32_t tailscale_advertise_ap = 1;
 int32_t tailscale_max_peers = 16;
 uint32_t tailscale_exit_node_ip = 0;
 int32_t tailscale_netcheck_override = 0;          /* default: OFF — netcheck mis-selects regions (garbage STUN RTTs: picked London #8 for a HU node, fra/nue sometimes missing because probes tunnel through the exit netif) which destabilises DERP. Stay on the configured/echoed home region until the netcheck STUN path is fixed. Runtime-overridable via NVS. */
@@ -121,6 +124,22 @@ void tailscale_init(void)
     tailscale_login_server     = nvs_str_or_empty("ts_login");
     tailscale_ipn_version      = nvs_str_or_empty("ts_ipn_ver");
     tailscale_advertise_routes = nvs_str_or_empty("ts_routes");
+    if (nvs_param_get_int("ts_adv_ap", &v) == ESP_OK) {
+        tailscale_advertise_ap = v ? 1 : 0;
+    } else {
+        /* Migration. This fork used to advertise the AP subnet from a
+         * Status-page toggle (ap_route_en, default off); upstream 0.1.24
+         * replaced it with ts_adv_ap, default on, and 0.1.25-W5500 merged the
+         * two. Without this, an operator who had deliberately turned the AP
+         * route off would silently start advertising it after the update.
+         * Carry the old value over once, then the new key owns it. */
+        uint8_t legacy = 0;
+        if (nvs_param_get_u8("ap_route_en", &legacy) == ESP_OK) {
+            tailscale_advertise_ap = legacy ? 1 : 0;
+            nvs_param_set_int("ts_adv_ap", tailscale_advertise_ap);
+            ESP_LOGI(TAG, "migrated ap_route_en=%u to ts_adv_ap", (unsigned)legacy);
+        }
+    }
     if (nvs_param_get_int("ts_maxpeers", &v) == ESP_OK && v >= 1 && v <= 64) {
         tailscale_max_peers = v;
     }
@@ -298,6 +317,33 @@ esp_err_t tailscale_connect(void)
 /* Compose the full advertised-routes string from all sources and return it
  * as a heap-allocated, newline-separated string.  Returns NULL when nothing
  * is to be advertised.  Caller must free(). */
+/* The AP subnet as "a.b.c.d/p" from the same NVS keys wifi_init_softap
+ * uses (ap_ip / ap_mask, default 192.168.4.1/24). Read from NVS rather
+ * than the live netif so it is right at boot, before the AP is up. */
+static bool ap_cidr_from_nvs(char *out, size_t out_size)
+{
+    char *ip_s = nvs_param_get_str("ap_ip");
+    char *mask_s = nvs_param_get_str("ap_mask");
+    ip4_addr_t ip, mask;
+    bool ok = ip_s && ip_s[0] && mask_s && mask_s[0] &&
+              ip4addr_aton(ip_s, &ip) && ip4addr_aton(mask_s, &mask);
+    if (!ok) {
+        ip4addr_aton("192.168.4.1", &ip);
+        ip4addr_aton("255.255.255.0", &mask);
+    }
+    free(ip_s);
+    free(mask_s);
+    uint32_t m = lwip_ntohl(ip4_addr_get_u32(&mask));
+    if (m == 0) return false;
+    unsigned prefix = 0;
+    for (uint32_t t = m; t & 0x80000000u; t <<= 1) prefix++;
+    uint32_t net = lwip_ntohl(ip4_addr_get_u32(&ip)) & m;
+    snprintf(out, out_size, "%u.%u.%u.%u/%u",
+             (unsigned)(net >> 24) & 0xFF, (unsigned)(net >> 16) & 0xFF,
+             (unsigned)(net >> 8) & 0xFF, (unsigned)net & 0xFF, prefix);
+    return true;
+}
+
 char *tailscale_compose_routes(void)
 {
 #define CR_MAX    16   /* max total CIDRs (manual + auto) */
@@ -358,24 +404,21 @@ char *tailscale_compose_routes(void)
         }
     }
 
-    /* 4. AP subnet auto-route — computed live from AP netif (static IP). */
-    {
-        uint8_t en = 0;
-        nvs_param_get_u8("ap_route_en", &en);
-        if (en) {
-            esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-            if (ap) {
-                esp_netif_ip_info_t info = {0};
-                if (esp_netif_get_ip_info(ap, &info) == ESP_OK && info.ip.addr) {
-                    uint32_t net_val = info.ip.addr & info.netmask.addr;
-                    int pfx = __builtin_popcount(info.netmask.addr);
-                    ip4_addr_t net_ip = { .addr = net_val };
-                    char ap_cidr[CR_CIDR];
-                    snprintf(ap_cidr, sizeof ap_cidr, IPSTR "/%d", IP2STR(&net_ip), pfx);
-                    CR_ADD(ap_cidr);
-                }
-            }
-        }
+    /* 4. AP subnet — advertised by default (upstream 0.1.24). A subnet
+     * router's reason to exist is its AP subnet, and the free-text list only
+     * ever held what the operator typed, so a fresh device announced nothing
+     * until someone filled the field. Advertising is harmless on its own:
+     * peers use the route only once it is approved in the admin console.
+     *
+     * Read from NVS rather than the live AP netif so it is correct at boot,
+     * before the AP is up — the netif read this replaced returned nothing on
+     * an early connect, which is exactly when the first advertisement goes
+     * out. Controlled by the Tailscale card's "Advertise the AP subnet"
+     * switch; the fork's old per-interface ap_route_en toggle was a second
+     * control for this same route and has been dropped. */
+    if (tailscale_advertise_ap) {
+        char ap_cidr[CR_CIDR];
+        if (ap_cidr_from_nvs(ap_cidr, sizeof ap_cidr)) CR_ADD(ap_cidr);
     }
 
     #undef CR_ADD

@@ -142,10 +142,11 @@ static void uplink_state_changed(void)
  * eth_route_en: auto-advertise ETH LAN CIDR.  Default 1 — zero-touch on ETH hardware.
  * sta_route_en: auto-advertise WiFi STA CIDR. Default 0 — opt-in, preserves original
  *               WiFi-only behavior where routes are set manually via the Tailscale tab.
- * ap_route_en:  advertise the AP subnet on the tailnet. Default 0 — opt-in. */
+ * The AP subnet is not here: it is advertised by default and controlled by the
+ * Tailscale card's "Advertise the AP subnet" switch (tailscale_advertise_ap,
+ * NVS ts_adv_ap) since upstream 0.1.24. */
 volatile uint8_t eth_route_en = 1;
 volatile uint8_t sta_route_en = 0;
-volatile uint8_t ap_route_en  = 0;
 
 /* WiFi STA uplink master switch. This device is primarily a drop-in wired
  * Tailscale router: Ethernet is the primary uplink, the AP exists for
@@ -958,7 +959,7 @@ void app_main(void)
 
     /* Per-interface subnet routing flags — loaded once at boot.
      * eth_route_en defaults 1 (zero-touch on ETH hardware).
-     * sta_route_en and ap_route_en default 0 (opt-in for WiFi-only compat). */
+     * sta_route_en defaults 0 (opt-in for WiFi-only compat). */
     {
         uint8_t v = 1;
         nvs_param_get_u8("eth_route_en", &v);
@@ -968,11 +969,6 @@ void app_main(void)
         uint8_t v = 0;
         nvs_param_get_u8("sta_route_en", &v);
         sta_route_en = v;
-    }
-    {
-        uint8_t v = 0;
-        nvs_param_get_u8("ap_route_en", &v);
-        ap_route_en = v;
     }
 
     /* WiFi STA uplink switch. Absent key = never configured, so derive the

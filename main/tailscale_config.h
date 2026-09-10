@@ -20,6 +20,7 @@ extern char* tailscale_hostname;         // Hostname registered on the tailnet
 extern char* tailscale_login_server;     // "" = Tailscale SaaS; otherwise Headscale URL (e.g. "http://192.168.1.42")
 extern char* tailscale_ipn_version;      // Hostinfo.IPNVersion reported to the control plane; "" = not reported (default)
 extern char* tailscale_advertise_routes; // Newline-separated CIDRs (e.g. "192.168.4.0/24\n192.168.1.0/24")
+extern int32_t tailscale_advertise_ap;   // 1 (default) = the AP subnet is advertised as a subnet route, computed live from the AP settings; 0 = only the listed routes
 extern int32_t tailscale_max_peers;      // Active WG tunnels (microlink default 16, range 1..64)
 extern uint32_t tailscale_exit_node_ip;  // VPN IP (host byte order) of selected exit node; 0 = none
 extern int32_t tailscale_netcheck_override;       // 1 = let netcheck override the chosen default region, 0 = always stay on default
@@ -60,13 +61,18 @@ void tailscale_connect_task(void *pvParameters);
 
 // Routing-decision helpers (called from netif hooks)
 void tailscale_set_subnet(uint32_t ip, uint32_t mask);
+
+/* Upstream's advertise_routes_effective() covered only the AP subnet plus
+ * the manual list. This fork composes ETH and STA auto-routes as well, so
+ * tailscale_compose_routes() below is the single source of truth and the
+ * upstream helper is gone. */
 bool tailscale_in_subnet(uint32_t ip);
 
 // Compose the full advertised-routes string from all sources:
 //   1. ts_routes — user-managed manual routes (Tailscale config page textarea)
 //   2. eth_route_cidr — auto-detected Ethernet LAN CIDR (when eth_route_en=1 in NVS)
 //   3. sta_route_cidr — auto-detected WiFi STA CIDR (when sta_route_en=1 in NVS)
-//   4. AP subnet     — computed live from AP netif   (when ap_route_en=1 in NVS)
+//   4. AP subnet     — computed from NVS ap_ip/ap_mask (when tailscale_advertise_ap=1)
 // All sources are deduplicated. Returns a malloc'd newline-separated string,
 // or NULL when there is nothing to advertise. Caller must free().
 char *tailscale_compose_routes(void);

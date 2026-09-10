@@ -40,3 +40,14 @@ void snmp_agent_get_config(bool *enabled_out, bool *running_out,
                            char *sys_name,     size_t name_sz,
                            char *sys_contact,  size_t cont_sz,
                            char *sys_location, size_t loc_sz);
+
+/* Die temperature in °C. Returns false if the sensor is unavailable.
+ *
+ * The ESP32-S3 has exactly one on-die thermal sensor and
+ * temperature_sensor_install() refuses a second owner, so this agent
+ * installs it once at init (regardless of whether SNMP is enabled) and
+ * everything else in the firmware reads it through here. web_ui.c used to
+ * lazy-install its own and, losing the race to snmp_agent_init(), reported
+ * no temperature at all while logging "Already installed" on every status
+ * poll. Safe to call from any task. */
+bool snmp_agent_chip_temp_c(float *out_c);

@@ -54,7 +54,8 @@ Up to **5** networks, tried in order. Per network:
 | **Hostname** | Node name on the tailnet. |
 | **Login server** | Custom control plane (Headscale). Empty = hosted Tailscale. Accepts `host`, `host:port`, `http://host[:port]`, `https://host[:port]` (TLS validates against public CAs only — no self-signed). Requires Headscale ≥ 0.26 (validated on v0.28.0). |
 | **Client version** | `Hostinfo.IPNVersion` reported to the control plane. Empty (default) = not reported. The Tailscale admin console gates some operations (e.g. reassigning a node address) on this and shows "Device is too old" when empty; set e.g. `1.98.9` to clear it, the `version.Long()` hash suffix is added automatically. Headscale users need none of this. Applies on the next restart. |
-| **Advertised subnet routes** | One CIDR per line; the AP subnet is offered automatically. |
+| **Advertise the AP subnet** | On by default. The AP subnet is announced as a subnet route, computed from the AP settings (so changing the AP address needs no route edit). Peers use it only after you approve it in the admin console. Off = announce only the list below. |
+| **Additional advertised subnet routes** | One CIDR per line, on top of the AP subnet — e.g. the uplink LAN (see Source-NAT). |
 | **Source-NAT advertised routes** | Off by default. Masquerades traffic forwarded from the tunnel out to the uplink LAN (or out to the internet when this device is an exit node) to the device's own STA IP — the Tailscale default for subnet routers. **On** = the uplink subnet works the moment you advertise it (upstream hosts reply to this device, which un-NATs back into the tunnel). **Off** = the upstream router needs a static route for the tailnet (`100.64.0.0/10 → this device`) instead. Enabling it offers to add your uplink subnet to the advertised routes. ⚠️ Do **not** advertise *and* accept the same subnet — that loops the inbound route back into the tunnel. |
 | **Exit node** | Route AP-client public traffic through this tailnet exit node. Fails closed if unreachable. |
 | **Max peers** | Upper bound on tracked peers. |
@@ -121,15 +122,21 @@ device would be a false alarm.
 
 ### Status page — subnet routing toggles
 
-Each network interface on the Status dashboard has an **Auto-route** (or **Advertise AP**) row with a checkbox and **Save** button. Enabling it advertises that interface's subnet to the tailnet; disabling it removes it from the composed route list. Changes take effect on the next Tailscale reconnect (triggered automatically).
+Each **uplink** interface on the Status dashboard has an **Auto-route** row with a checkbox and **Save** button. Enabling it advertises that interface's subnet to the tailnet; disabling it removes it from the composed route list. Changes take effect on the next Tailscale reconnect (triggered automatically).
 
 | Interface | Default | Notes |
 |---|---|---|
 | **Ethernet (ETH)** | **On** (when ETH hardware present) | CIDR is cached on first DHCP lease and re-cached on address change. Zero-touch — no configuration needed on ETH-equipped hardware. |
 | **WiFi uplink (STA)** | **Off** | Opt-in; preserves original WiFi-only behaviour. Enabling immediately reads the live STA IP so the CIDR is ready for the next restart, without waiting for the next DHCP event. |
-| **Access Point (AP)** | **Off** | Opt-in. CIDR is always computed live from the static AP IP — no NVS cache. |
 
-> **These toggles are independent of the manual textarea.** Enabling STA or AP auto-routing adds that subnet *alongside* whatever is in the textarea — it never removes or replaces user-entered CIDRs.
+The **AP subnet** is not here — it is advertised by default and controlled by
+**Advertise the AP subnet** on the Tailscale card (see the table above).
+Before 0.1.25-W5500 this fork had a third Status-page toggle for it, off by
+default; upstream 0.1.24 added its own switch for the same route, so the two
+were merged into upstream's one and the default became **on**. A device that
+had explicitly saved the old off state keeps it.
+
+> **These toggles are independent of the manual textarea.** Enabling STA auto-routing adds that subnet *alongside* whatever is in the textarea — it never removes or replaces user-entered CIDRs.
 
 > **Approve the route in Tailscale admin.** Any newly advertised subnet (manual or auto) must be approved under Machines → *your device* → **Edit route settings** before tailnet peers can use it.
 

@@ -117,12 +117,12 @@ traffic you route through it.)*
   Tailscale subnet router. When a W5500 SPI Ethernet adapter is connected it
   becomes the uplink automatically; WiFi shifts to AP-only, freeing the radio
   for IoT clients.
-- **Per-interface subnet routing** — three independent toggles on the Status
-  dashboard advertise each subnet to the tailnet separately:
+- **Per-interface subnet routing** — the AP subnet is advertised by default
+  (one switch on the Tailscale card), and two further toggles on the Status
+  dashboard advertise the uplink subnets separately:
   - **ETH LAN** — auto-detected and zero-touch on ETH-equipped hardware.
   - **WiFi STA** — opt-in (off by default, preserving original WiFi-only behaviour).
-  - **AP subnet** — opt-in, always computed live from the static AP IP.
-  All three are merged with the manual routes textarea at connect time;
+  All of them are merged with the manual routes textarea at connect time;
   the textarea is never overwritten by auto-detection.
 - **Expose the upstream LAN too** — an optional Source-NAT (à la Tailscale
   `--snat-subnet-routes`) lets tailnet peers reach the network the device is
@@ -278,8 +278,8 @@ Copy the key (it starts with `tskey-auth-…`).
 #### 4b · Paste it into the device
 
 On the device's **Tailscale** tab, paste the auth key, set a **hostname**,
-and list the **subnet(s) to advertise** (your AP subnet is offered
-automatically). Pick an **exit node** here too if you want AP clients to
+and check the **subnet(s) to advertise** (your AP subnet is advertised
+by default; add more below it). Pick an **exit node** here too if you want AP clients to
 egress through it. Save — the device registers with your tailnet on its
 next connect.
 

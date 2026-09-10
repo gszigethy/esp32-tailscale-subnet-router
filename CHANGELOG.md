@@ -6,6 +6,47 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.25-W5500] — 2026-09-10
+
+Upstream 0.1.24 and 0.1.25 merged into the fork, on top of the W5500 Ethernet uplink and the SNMP agent. Device-tested on the bench router before tagging: full SNMP walk over the wire (82 OIDs, clean termination), wired uplink counting traffic, the tunnel up and answering pings with `ts0` counters matching packet-for-packet, and the die temperature reading through both the SNMP and web-UI paths.
+
+Most of upstream 0.1.25 is three fixes it ported *from* this fork (`82aa72b`, `3919040`, `d1f81a6`), so the merge kept the fork's originals — they cover the Ethernet paths upstream's copies deliberately left out. What came in new is upstream 0.1.24's AP-subnet behaviour, the microlink teardown fixes, and the reconnect test hook.
+
+### Changed
+- **The AP subnet is advertised by default** (upstream 0.1.24). A subnet router's reason to exist is its AP subnet, and a fresh device used to announce nothing until someone filled in the route field.
+- **One control for the AP route, not two.** This fork already advertised the AP subnet from a Status-page toggle (`ap_route_en`, default off); upstream 0.1.24 added *Advertise the AP subnet* on the Tailscale card (`ts_adv_ap`, default on) for the same route. Two switches for one route means one of them silently does nothing, so the fork's toggle is gone and upstream's is the control. An explicitly saved `ap_route_en` is migrated to `ts_adv_ap` on first boot, so a device that deliberately had the AP route off keeps it off; everything else picks up the new default. The Status page keeps its ETH and STA auto-route toggles.
+- **The Tailscale tab's route preview now shows what is actually advertised.** Upstream's helper composed the AP subnet plus the manual list; on this fork that under-reports on any wired box, so the preview and the connect path both use the fork's composer (manual + ETH + STA + AP, de-duplicated).
+
+### Fixed
+- **The web UI reported no CPU temperature, and logged an error on every status poll.** The ESP32-S3 has one on-die thermal sensor and `temperature_sensor_install()` refuses a second owner. The SNMP agent claims it at boot, so `web_ui.c`'s lazy install lost the race and returned -999 for the rest of the uptime while logging `temperature_sensor_install(136): Already installed` each time the Status page refreshed. Introduced with the SNMP agent in 0.1.23-W5500-snmpd and present in every build since. There is now a single owner and one accessor (`snmp_agent_chip_temp_c()`) that both the MIB and the web UI read through.
+
+### Added
+- Upstream's reconnect test hook, `POST /api/debug/ts-reconnect {"burst": N}` — spawns N connect tasks 100 ms apart to exercise the lifecycle serialization.
+- Upstream's microlink teardown fixes (submodule `412f52e` → `4843ab0`): tasks sign off before exit, `stop` waits for them, and `destroy` frees the long-poll buffers and DERP TLS state — the ~650 KB-per-reconnect PSRAM leak and the teardown panic.
+
+## [0.1.25] — 2026-09-10
+
+A robustness release: three fixes ported from a community fork, and a microlink teardown bug they helped surface. Device-tested before tagging: manual OTA, five bursts of three connect requests and three single reconnects with no reset and a steady heap, six peers direct, an AP client through the router, the exit node via a relay and back.
+
+Three fixes ported from [@gszigethy](https://github.com/gszigethy)'s fork ([gszigethy/esp32-tailscale-subnet-router](https://github.com/gszigethy/esp32-tailscale-subnet-router), commits `82aa72b`, `3919040`, `d1f81a6`), found while reviewing his Ethernet-uplink work; the Ethernet parts stay in the fork until there is hardware here to test them on.
+
+### Fixed
+- **Two Tailscale connect tasks could tear down and rebuild the same instance at once.** The connect task is spawned from the STA got-IP handler with nothing serialising it, so a WiFi flap inside the up-to-30 s SNTP wait started a second one; both end in `tailscale_connect()`, which destroys and re-creates the microlink instance — one destroying the handle the other was initialising through (use-after-free), or two instances with the first one's tasks and sockets leaked. A lifecycle mutex now makes connect and disconnect mutually exclusive, and redundant requests collapse to "one in flight, one queued". Reproduced and verified here with a deliberate burst of three connect requests (new test hook `POST /api/debug/ts-reconnect {"burst": N}`).
+- **A reconnect could crash the device, and every reconnect leaked ~650 KB of PSRAM** (microlink). Reproduced with the new burst hook: `microlink_stop()` slept a fixed 3 s and then `microlink_destroy()` freed the instance under a coord task still inside the map long-poll (PANIC in `poll_map_update`); and `destroy` never released the long-poll accumulators nor the DERP TLS state — 5.12 → 4.27 → 3.62 → 2.97 MB free over three clean reconnects, about eight WiFi flaps from an out-of-memory router. Every microlink task now signs off before exiting, `stop` waits for all of them (bounded at 15 s, leaking the instance deliberately if one is stuck), and `destroy` frees the buffers and the TLS state. Five bursts of three and three single reconnects on the reference router: no reset, heap steady.
+- **Long Cookie headers logged the operator out.** The session lookup read the header into 160 bytes and treated truncation as an error, so a browser that also held a couple of unrelated cookies for the same origin (reverse proxy, shared hostname) was silently unauthenticated. Now 512 bytes, truncation tolerated, and the token comparison is bounded to the cookie value and constant-time.
+
+### Changed
+- `ap_connect` / `connect_count` are `volatile`: written by WiFi event handlers, read from the web server and spin-waited on by the telemetry sender; it only worked because `vTaskDelay()` is opaque to the compiler.
+
+## [0.1.24] — 2026-09-10
+
+A subnet router that advertises its subnet out of the box, and a build-reproducibility fix. Device-tested before tagging: manual OTA, the route switch off and on with the advertised set read back from the admin API, six peers direct, an AP client through the router.
+
+### Changed
+- **The AP subnet is advertised by default.** A subnet router's reason to exist is its AP subnet, but the route list only ever held what the operator typed in — the UI merely *offered* the AP CIDR — so a freshly flashed device announced nothing until someone filled the field (the reference router itself had run that way for months, found while checking the renewed admin-API token). New *Advertise the AP subnet* switch on the Tailscale card, on by default: the AP CIDR is announced as a subnet route, computed live from the AP settings (changing the AP address needs no route edit any more), and the free-text list becomes *additional* routes. Advertising on its own moves no traffic — peers use the route only after it is approved in the admin console. Turn the switch off to announce only the listed routes.
+
+### Build
+- **`sdkconfig.defaults` now pins `CONFIG_LWIP_MAX_ACTIVE_TCP=24` and `CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=4`.** Every release since 0.1.17 was built from a local sdkconfig that carried these two values; the tracked defaults never had them, so a fresh clone would have compiled IDF's 16 active PCBs and a derived out-of-order limit — a different firmware from the one measured on the reference router. Pinned with the rationale next to them; nothing changes for the published binaries.
 ## [0.1.23-W5500-snmpd] — 2026-09-10
 
 Read-only SNMP monitoring, so the router can be graphed by whatever already watches the rest of the network. Device-tested before tagging on the bench router: full walk over the wire from a second machine, traffic counters checked against a known number of pings on both the wired uplink and the Tailscale tunnel, CPU load checked at idle and under a 400 req/s flood, and the parser fuzzed with malformed PDUs.

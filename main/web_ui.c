@@ -71,7 +71,6 @@ extern volatile int sta_connect;
 extern volatile int connect_count;
 extern volatile uint8_t eth_route_en;
 extern volatile uint8_t sta_route_en;
-extern volatile uint8_t ap_route_en;
 extern volatile uint8_t sta_uplink_en;
 /* Owned by main.c — persists the switch and applies it to the radio live. */
 extern void sta_uplink_set(uint8_t enable);
@@ -221,20 +220,15 @@ static uint8_t sample_cpu_load_pct(void)
 }
 
 /* Internal CPU temperature in °C, or -999 if the sensor isn't available.
- * Lazy-installs on first call; the sensor draws ~1 mA continuously while
- * enabled, so we keep it running once installed rather than turn it on
- * and off per sample. Diag-tab also calls into this via its own copy
- * (kept until the diag handler migrates to this shared helper). */
+ *
+ * The chip has one thermal sensor and temperature_sensor_install() refuses a
+ * second owner. snmp_agent_init() claims it at boot, so this used to
+ * lazy-install, lose, and return -999 forever while logging "Already
+ * installed" on every status poll. Read through the one owner instead. */
 static float sample_cpu_temp_c(void)
 {
-    static temperature_sensor_handle_t s_sensor = NULL;
-    if (!s_sensor) {
-        temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
-        if (temperature_sensor_install(&cfg, &s_sensor) != ESP_OK) return -999.0f;
-        temperature_sensor_enable(s_sensor);
-    }
     float tc = 0;
-    if (temperature_sensor_get_celsius(s_sensor, &tc) != ESP_OK) return -999.0f;
+    if (!snmp_agent_chip_temp_c(&tc)) return -999.0f;
     return tc;
 }
 
@@ -416,21 +410,6 @@ static esp_err_t status_handler(httpd_req_t *req)
     }
     cJSON_AddNumberToObject(ap, "bytes_in",  (double)netif_hooks_get_ap_bytes_in());
     cJSON_AddNumberToObject(ap, "bytes_out", (double)netif_hooks_get_ap_bytes_out());
-    /* AP subnet routing toggle and computed CIDR (AP IP is static — no NVS cache). */
-    cJSON_AddBoolToObject(ap, "route_en", ap_route_en != 0);
-    if (ap_route_en && ap_if) {
-        esp_netif_ip_info_t ap_rt_ip = {0};
-        if (esp_netif_get_ip_info(ap_if, &ap_rt_ip) == ESP_OK && ap_rt_ip.ip.addr) {
-            uint32_t net = ap_rt_ip.ip.addr & ap_rt_ip.netmask.addr;
-            int ap_pfx2 = subnet_mask_prefix_len(ap_rt_ip.netmask.addr);
-            if (ap_pfx2 >= 0) {
-                char netbuf[16], cidrbuf[32];
-                ip4_to_str(net, netbuf, sizeof netbuf);
-                snprintf(cidrbuf, sizeof cidrbuf, "%s/%u", netbuf, (unsigned)ap_pfx2);
-                cJSON_AddStringToObject(ap, "route_cidr", cidrbuf);
-            }
-        }
-    }
     cJSON_AddItemToObject(root, "ap", ap);
 
     /* Radio-wide TX power (live, post-override). Same value for both
@@ -2713,6 +2692,17 @@ static esp_err_t tailscale_handler(httpd_req_t *req)
     cJSON_AddBoolToObject  (settings, "lan_bypass",              tailscale_lan_bypass != 0);
     cJSON_AddBoolToObject  (settings, "accept_routes",           tailscale_accept_routes != 0);
     cJSON_AddBoolToObject  (settings, "snat_subnet_routes",      tailscale_snat_subnet_routes != 0);
+    cJSON_AddBoolToObject  (settings, "advertise_ap",            tailscale_advertise_ap != 0);
+    {
+        /* The same composer the connect path uses, so what the UI previews is
+         * exactly what gets advertised — AP subnet plus the ETH and STA
+         * auto-routes plus the manual list, de-duplicated. Upstream's
+         * advertise_routes_effective() covered only AP + manual; on this fork
+         * that would under-report on any wired box. Returns malloc'd. */
+        char *eff = tailscale_compose_routes();
+        cJSON_AddStringToObject(settings, "effective_routes", eff ? eff : "");
+        free(eff);
+    }
     {
         /* Settings show the SAVED exit node (NVS), not the live one: a save
          * no longer touches the running route (see the save handler), so the
@@ -2953,6 +2943,7 @@ static esp_err_t tailscale_save_handler(httpd_req_t *req)
         _TS_REFRESH_BOOL("lan_bypass",              tailscale_lan_bypass);
         _TS_REFRESH_BOOL("accept_routes",           tailscale_accept_routes);
         _TS_REFRESH_BOOL("snat_subnet_routes",      tailscale_snat_subnet_routes);
+        _TS_REFRESH_BOOL("advertise_ap",            tailscale_advertise_ap);
 
         #undef _TS_REFRESH_STR
         #undef _TS_REFRESH_BOOL
@@ -2966,6 +2957,7 @@ static esp_err_t tailscale_save_handler(httpd_req_t *req)
             { cJSON_GetObjectItem(s, "lan_bypass"),        (void *)"ts_lan_bp"  },
             { cJSON_GetObjectItem(s, "accept_routes"),     (void *)"ts_acpt_rt" },
             { cJSON_GetObjectItem(s, "snat_subnet_routes"), (void *)"ts_snat_sr" },
+            { cJSON_GetObjectItem(s, "advertise_ap"),      (void *)"ts_adv_ap"  },
         };
         for (size_t i = 0; i < sizeof bool_keys / sizeof bool_keys[0]; i++) {
             const cJSON *v = bool_keys[i][0];
@@ -3384,6 +3376,47 @@ static esp_err_t system_debug_crash_handler(httpd_req_t *req)
 }
 static const httpd_uri_t uri_system_debug_crash = {
     .uri = "/api/debug/crash", .method = HTTP_POST, .handler = system_debug_crash_handler,
+};
+
+/* POST /api/debug/ts-reconnect {"burst": N} -- test hook for the Tailscale
+ * lifecycle serialization (tailscale_manager.c): spawns N (1..5) connect
+ * tasks 100 ms apart, the way N WiFi got-IP events in quick succession
+ * would. Expected: one connect runs, one is queued behind it, the rest log
+ * "coalescing" and exit, and the tunnel comes back with every peer. Same
+ * guard as /api/debug/crash: authenticated, deliberate, never called by the
+ * SPA. */
+static void reconnect_burst_task(void *arg)
+{
+    int n = (int)(intptr_t)arg;
+    for (int i = 0; i < n; i++) {
+        xTaskCreate(tailscale_connect_task, "ts_connect", 4096, NULL, 5, NULL);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    vTaskDelete(NULL);
+}
+static esp_err_t system_debug_ts_reconnect_handler(httpd_req_t *req)
+{
+    if (require_auth(req) != ESP_OK) return ESP_FAIL;
+    char buf[64];
+    int n = 3;
+    if (recv_body(req, buf, sizeof buf, NULL) == ESP_OK) {
+        cJSON *root = cJSON_Parse(buf);
+        if (root) {
+            const cJSON *b = cJSON_GetObjectItem(root, "burst");
+            if (cJSON_IsNumber(b)) n = (int)b->valuedouble;
+            cJSON_Delete(root);
+        }
+    }
+    if (n < 1) n = 1;
+    if (n > 5) n = 5;
+    xTaskCreate(reconnect_burst_task, "ts_burst", 2048, (void *)(intptr_t)n, 5, NULL);
+    httpd_resp_set_type(req, "application/json");
+    char resp[48];
+    snprintf(resp, sizeof resp, "{\"ok\":true,\"burst\":%d}", n);
+    return httpd_resp_sendstr(req, resp);
+}
+static const httpd_uri_t uri_system_debug_ts_reconnect = {
+    .uri = "/api/debug/ts-reconnect", .method = HTTP_POST, .handler = system_debug_ts_reconnect_handler,
 };
 
 static const httpd_uri_t uri_system_save = {
@@ -4774,60 +4807,6 @@ static const httpd_uri_t uri_sta_routing = {
     .uri = "/api/sta-routing", .method = HTTP_POST, .handler = sta_routing_handler,
 };
 
-/* POST /api/ap-routing — toggle auto-advertisement of the WiFi AP subnet.
- * Body: {"enabled": true|false}
- * The AP CIDR is always computed live from the AP netif (no NVS cache needed
- * because the AP IP is static and always available). */
-static esp_err_t ap_routing_handler(httpd_req_t *req)
-{
-    if (require_auth(req) != ESP_OK) return ESP_FAIL;
-    char *buf = malloc_body_buf(512);
-    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
-    if (recv_body(req, buf, 512, NULL) != ESP_OK) { free(buf); return ESP_FAIL; }
-    cJSON *root = cJSON_Parse(buf);
-    free(buf);
-    if (!root) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON"); return ESP_FAIL; }
-
-    const cJSON *j_enabled = cJSON_GetObjectItem(root, "enabled");
-    if (cJSON_IsBool(j_enabled)) {
-        uint8_t en = cJSON_IsTrue(j_enabled) ? 1 : 0;
-        ap_route_en = en;
-        nvs_param_set_u8("ap_route_en", en);
-        ESP_LOGI(TAG, "ap-routing %s", en ? "ON" : "OFF");
-        if (tailscale_enabled) {
-            tailscale_connected = false;
-            xTaskCreate(tailscale_connect_task, "ts_connect", 4096, NULL, 5, NULL);
-        }
-    }
-    cJSON_Delete(root);
-
-    cJSON *resp = cJSON_CreateObject();
-    cJSON_AddBoolToObject(resp, "route_en", ap_route_en != 0);
-    esp_netif_t *ap_nif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-    if (ap_nif && ap_route_en) {
-        esp_netif_ip_info_t ap_info = {0};
-        if (esp_netif_get_ip_info(ap_nif, &ap_info) == ESP_OK && ap_info.ip.addr) {
-            uint32_t net = ap_info.ip.addr & ap_info.netmask.addr;
-            int pfx = subnet_mask_prefix_len(ap_info.netmask.addr);
-            if (pfx >= 0) {
-                char netbuf[16], cidrbuf[32];
-                ip4_to_str(net, netbuf, sizeof netbuf);
-                snprintf(cidrbuf, sizeof cidrbuf, "%s/%u", netbuf, (unsigned)pfx);
-                cJSON_AddStringToObject(resp, "route_cidr", cidrbuf);
-            }
-        }
-    }
-    char *s = cJSON_PrintUnformatted(resp);
-    cJSON_Delete(resp);
-    httpd_resp_set_type(req, "application/json");
-    esp_err_t ret = httpd_resp_sendstr(req, s ? s : "{}");
-    free(s);
-    return ret;
-}
-static const httpd_uri_t uri_ap_routing = {
-    .uri = "/api/ap-routing", .method = HTTP_POST, .handler = ap_routing_handler,
-};
-
 /* POST /api/wifi-uplink — master switch for using WiFi STA as an uplink.
  * Body: {"enabled": true|false}
  * Off is the default for a fresh device: this is primarily a wired router and
@@ -5035,6 +5014,7 @@ void web_ui_init(void)
     reg_uri(server, &uri_system_secrets_post);
     reg_uri(server, &uri_system_diag);
     reg_uri(server, &uri_system_debug_crash);
+    reg_uri(server, &uri_system_debug_ts_reconnect);
     reg_uri(server, &uri_auth_status);
     reg_uri(server, &uri_auth_login);
     reg_uri(server, &uri_auth_logout);
@@ -5049,7 +5029,6 @@ void web_ui_init(void)
     reg_uri(server, &uri_sdlog_erase);
     reg_uri(server, &uri_eth_routing);
     reg_uri(server, &uri_sta_routing);
-    reg_uri(server, &uri_ap_routing);
     reg_uri(server, &uri_wifi_uplink);
     reg_uri(server, &uri_eth_uplink);
     reg_uri(server, &uri_favicon);
