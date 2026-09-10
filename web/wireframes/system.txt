@@ -7,140 +7,239 @@ Single-column, card-per-section layout on all breakpoints.
 Sections ordered by risk: safe config changes first, destructive actions last.
 Danger zone card always at the bottom, separated by extra spacing.
 
-DESKTOP + MOBILE (same structure, form grids collapse on mobile)
+NAV TABS (actual order in HTML)
+──────────────────────────────
+Status · Network · Tailscale · Firewall · Tools · System
+
+DESKTOP + MOBILE (same card structure, grids collapse on mobile)
 ─────────────────────────────────────────────────────────────────
 
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  System                                                                  │
-│  Password · firmware · backup/restore · telemetry · danger zone          │
-├───────────────────────────────────────────────────────────────────────── │
+│  System                                               [Refresh]          │
+│  Firmware info, telemetry, password, OTA, about, danger zone             │
+├──────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │ WEB INTERFACE PASSWORD                                           │   │
+│  │ DEVICE                                                           │   │
 │  │ ─────────────────────────────────────────────────────────────── │   │
-│  │  [grid-cols-2 on desktop, 1-col on mobile]                       │   │
-│  │  Current Password           New Password                         │   │
-│  │  [••••••••••  👁]           [••••••••••  👁]                    │   │
-│  │                             Confirm New Password                 │   │
-│  │                             [••••••••••  👁]                    │   │
-│  │ ─── footer ────────────────────────────────────────────────── │   │
-│  │  Leave new password empty to disable protection.  [Save]        │   │
-│  └──────────────────────────────────────────────────────────────────┘   │
-│                                                                          │
-│  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │ SESSION                                                          │   │
-│  │ ─────────────────────────────────────────────────────────────── │   │
-│  │  Auth timeout   [30 minutes  ▾]                                  │   │
-│  │  Options: 5 min / 30 min / 4 hours / 24 hours / Never           │   │
-│  │ ─── footer ─────────────────────────────────────────────────── │   │
-│  │                                               [Save]            │   │
-│  └──────────────────────────────────────────────────────────────────┘   │
-│                                                                          │
-│  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │ FIRMWARE                                                         │   │
-│  │ ─────────────────────────────────────────────────────────────── │   │
-│  │  Running partition    ota_0                                      │   │
-│  │  Version              v0.9.1-beta                                │   │
-│  │  Build date           2026-05-19 14:23:08                        │   │
-│  │  ESP-IDF              v5.3.1                                     │   │
+│  │  [grid-cols-2 on desktop]                                        │   │
+│  │  Friendly name              Timezone                             │   │
+│  │  [ESP32 Router         ]    [UTC+1/+2 — Europe/Budapest  ▾]      │   │
 │  │                                                                   │   │
-│  │  Upload new firmware (.bin)                                      │   │
-│  │  ┌─────────────────────────────────────────────────────────┐    │   │
-│  │  │  Choose .bin file...                             [Browse]│    │   │
-│  │  └─────────────────────────────────────────────────────────┘    │   │
-│  │  [Upload Firmware]                                               │   │
+│  │  TX power (0 = default, 8–84 in 0.25 dBm steps)                 │   │
+│  │  [  80  ]  80 ≈ 20.00 dBm                                        │   │
 │  │                                                                   │   │
-│  │  ████████████████████░░░░░  80%  (progress bar during upload)   │   │
+│  │  Firmware version   v0.1.23-W5500                                │   │
+│  │  Build tag          v0.1.23-W5500-20260910                        │   │
+│  │  ESP-IDF            v5.5.3                                        │   │
+│  │  Device hash        a3f7c2b1d4...  (mono, truncated)             │   │
+│  │ ─── footer ─────────────────────────────────────────────────── │   │
+│  │  Friendly-name change applies immediately. Backup optionally...  │   │
+│  │  [Restore…]  [Download config]                        [Save]    │   │
 │  └──────────────────────────────────────────────────────────────────┘   │
 │                                                                          │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │ CONFIG BACKUP / RESTORE                                          │   │
+│  │ SNMP AGENT                                          [Running]    │   │
 │  │ ─────────────────────────────────────────────────────────────── │   │
-│  │  Export config   [Download JSON]  → GET /api/config-export       │   │
+│  │  [☑] Enable SNMP agent                                           │   │
 │  │                                                                   │   │
-│  │  Import config                                                   │   │
-│  │  ┌──────────────────────────────────────────────┐               │   │
-│  │  │  Choose .json file...                [Browse]│               │   │
-│  │  └──────────────────────────────────────────────┘               │   │
-│  │  [Upload Config]  (reboots after import)                         │   │
-│  └──────────────────────────────────────────────────────────────────┘   │
-│                                                                          │
-│  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │ TIME ZONE                                                        │   │
-│  │ ─────────────────────────────────────────────────────────────── │   │
-│  │  Preset     [Europe/Budapest (CET-1CEST,M3.5.0,M10.5.0/3)  ▾]  │   │
-│  │  POSIX TZ   [CET-1CEST,M3.5.0,M10.5.0/3                   ]   │   │
-│  │  (Preset selection auto-fills POSIX TZ field; editable directly) │   │
+│  │  [grid-cols-2 on desktop]                                        │   │
+│  │  Community              sysName                                   │   │
+│  │  [public             ]  [esp32-router       ]                     │   │
+│  │                                                                   │   │
+│  │  sysContact             sysLocation                               │   │
+│  │  [                   ]  [                   ]                     │   │
+│  │                                                                   │   │
+│  │  ℹ Listens on all interfaces · UDP 0.0.0.0:161                   │   │
+│  │    SNMPv1/v2c · read-only                                        │   │
+│  │    MIB-II (interfaces, IP, UDP) + Tailscale state,               │   │
+│  │    uplink, free heap, and per-core CPU OIDs                      │   │
 │  │ ─── footer ─────────────────────────────────────────────────── │   │
 │  │                                               [Save]            │   │
 │  └──────────────────────────────────────────────────────────────────┘   │
 │                                                                          │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │ ANONYMOUS TELEMETRY                                              │   │
+│  │ SD CARD LOGGING                                     [—]          │   │
 │  │ ─────────────────────────────────────────────────────────────── │   │
-│  │  [info text: what is/isn't sent — collapsed behind [▶ Details]] │   │
-│  │  Service   ◉ Enabled   ○ Disabled                                │   │
-│  │  Status    [OK]  (badge-success / badge-warning / badge-danger)  │   │
-│  │  Device ID  a3f7c2b1  (mono, truncated SHA-256 hash)             │   │
-│  │  Boot       47    Flash   12                                     │   │
-│  │ ─── footer ─────────────────────────────────────────────────── │   │
-│  │                                               [Save]            │   │
+│  │  Persists every ESP_LOG line to the onboard microSD card...      │   │
+│  │  [No usable SD card. Insert a FAT32-formatted card and reboot.]  │   │
+│  │                                                                   │   │
+│  │  SD recorder  [All (info + warnings + errors)              ▾]    │   │
+│  │                                                                   │   │
+│  │  Log files (0)                       [Refresh]  [Erase all]      │   │
+│  │  (file list, mono, scrollable, max-height 14rem)                 │   │
+│  │                                                                   │   │
+│  │  Tail latest  lines [200 ▾]  [Refresh]                           │   │
+│  │  (pre output, mono, max-height 280px, display:none until fetch)  │   │
 │  └──────────────────────────────────────────────────────────────────┘   │
 │                                                                          │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
-│  │ REMOTE CONSOLE                                                   │   │
+│  │ FIRMWARE UPDATE                                     [—]          │   │
 │  │ ─────────────────────────────────────────────────────────────── │   │
-│  │  Service   ◉ Enabled   ○ Disabled                                │   │
-│  │  Status    [Connected: 10.0.0.42:50241]  [Kick]                  │   │
-│  │  Port       2323                                                  │   │
-│  │  Bind       ☑ AP   ☑ STA   ☐ Tailscale                          │   │
-│  │  ⚠ Tailscale binding = plain TCP inside encrypted tunnel.        │   │
-│  │    Ensure your Tailnet ACLs restrict access to port 2323.        │   │
-│  │  Idle timeout  300 sec  (0 = never)                              │   │
+│  │  The device checks GitHub Releases once a day and after boot...  │   │
+│  │  [grid-cols-2]                                                    │   │
+│  │  Running      v0.1.23-W5500    Latest seen   v0.1.23-W5500       │   │
+│  │  Last check   2026-09-10 08:05  Status       Up to date          │   │
+│  │                                                                   │   │
+│  │  [☐] Install updates automatically                               │   │
+│  │  [☐] Beta channel (include pre-releases)                         │   │
+│  │  Install hour  [As soon as detected  ▾]                          │   │
+│  │  ▶ Release notes  (collapsed <details>)                          │   │
+│  │  ──────────────────────────────────────────────────             │   │
+│  │  Manual upload (firmware.bin)  [file input]                      │   │
+│  │  [progress bar — hidden until upload starts]                     │   │
 │  │ ─── footer ─────────────────────────────────────────────────── │   │
-│  │                                               [Save]            │   │
+│  │  (last-version hint)                                             │   │
+│  │  [Check now]  [Install now (disabled)]  [Upload & reboot]  [Save]│   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ WEB SESSION                                         [—]          │   │
+│  │ ─────────────────────────────────────────────────────────────── │   │
+│  │  After this much idle time the web UI logs you out...            │   │
+│  │  Idle timeout  [30 minutes  ▾]                                    │   │
+│  │  Options: 5 min / 15 min / 30 min / 1 h / 2 h / 4 h / 8 h      │   │
+│  │ ─── footer ─────────────────────────────────────────────────── │   │
+│  │  Applies immediately...                               [Save]    │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ CHANGE ADMIN PASSWORD                                            │   │
+│  │ ─────────────────────────────────────────────────────────────── │   │
+│  │  Current Password                                                │   │
+│  │  [••••••••••  ]                                                   │   │
+│  │  [grid-cols-2]                                                    │   │
+│  │  New Password               Confirm New Password                 │   │
+│  │  [••••••••••  ]             [••••••••••  ]                       │   │
+│  │  Min 8 chars, lowercase + uppercase + digit + special            │   │
+│  │                                          [Change password]       │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ ABOUT                                               [MIT]        │   │
+│  │ ─────────────────────────────────────────────────────────────── │   │
+│  │  esp32-tailscale-subnet-router — description text                │   │
+│  │  Firmware version   v0.1.23-W5500                                │   │
+│  │  Build tag          v0.1.23-W5500-20260910                        │   │
+│  │  Source             github.com/gszigethy/esp32-tailscale-...     │   │
+│  │  Issues             github.com/…/issues                          │   │
+│  │  Tailscale stack    Csontikka/microlink                          │   │
+│  │  License            MIT — see LICENSE in the repo               │   │
+│  │  Anonymous telemetry  [☐]  Disabled                              │   │
+│  └──────────────────────────────────────────────────────────────────┘   │
+│                                                                          │
+│  ┌──────────────────────────────────────────────────────────────────┐   │
+│  │ ☕ SUPPORT THE PROJECT          .card-stripe-accent              │   │
+│  │ ─────────────────────────────────────────────────────────────── │   │
+│  │  If this firmware saved you a router purchase...                 │   │
+│  │  [Csontikka bunny image]   [☕ Buy me a coffee]                  │   │
 │  └──────────────────────────────────────────────────────────────────┘   │
 │                                                                          │
 │  ╔══════════════════════════════════════════════════════════════════╗   │
-│  ║ ⚠ DANGER ZONE              .card .card-stripe-danger            ║   │
+│  ║ ⚠ DANGER ZONE              .card-stripe-danger                  ║   │
 │  ║ ─────────────────────────────────────────────────────────────── ║   │
-│  ║  Factory Reset                                                   ║   │
-│  ║  Erases all NVS settings. Reboots into default state.           ║   │
-│  ║                                          [Factory Reset]        ║   │
-│  ║                                                                   ║   │
-│  ║  Clear Web Password                                              ║   │
-│  ║  Removes password protection from web interface immediately.    ║   │
-│  ║                                       [Clear Password]          ║   │
-│  ║                                                                   ║   │
-│  ║  Disable Web UI                                                  ║   │
-│  ║  Re-enable via serial: web_ui enable                            ║   │
-│  ║                                          [Disable Web UI]       ║   │
+│  ║  Reboot device                                                   ║   │
+│  ║  Clean restart — applies pending NVS changes...  [Reboot]       ║   │
+│  ║  ─────────────────────────────────────────────────────────────  ║   │
+│  ║  Clear admin password                                            ║   │
+│  ║  Removes the web password and logs you out...     [Clear]        ║   │
+│  ║  ─────────────────────────────────────────────────────────────  ║   │
+│  ║  Factory reset                                                   ║   │
+│  ║  Erases ALL NVS settings...                  [Factory reset]    ║   │
 │  ╚══════════════════════════════════════════════════════════════════╝   │
 │                                                                          │
 └──────────────────────────────────────────────────────────────────────────┘
 
+
+SNMP AGENT — CARD DETAIL
+─────────────────────────
+
+Position: after Device card, before SD card logging.
+
+Enable/Disable:
+  Single checkbox: [☑] Enable SNMP agent
+  Unchecking and saving stops the agent; the status badge goes to
+  [Stopped] (badge-neutral). Checking and saving starts it; badge goes to
+  [Running] (badge-success).
+  Badge shown in card header right slot (same pattern as SD card logging
+  and Firmware update badges).
+
+Fields (all .input, not .input-mono — free-form printable ASCII):
+  Community    max 255 chars  placeholder "public"
+  sysName      max 255 chars  placeholder empty (or device friendly name)
+  sysContact   max 255 chars  placeholder empty
+  sysLocation  max 255 chars  placeholder empty
+
+Info blurb (static, not collapsible — short enough to leave visible):
+  ℹ Listens on all interfaces · UDP 0.0.0.0:161
+    SNMPv1/v2c · read-only
+    MIB-II (interfaces, IP, UDP) + Tailscale state,
+    uplink, free heap, and per-core CPU OIDs
+
+Footer:
+  Right-aligned [Save] only. No secondary actions.
+
+Save behaviour:
+  POST /api/snmp — saves enabled flag + four NVS fields.
+  Agent restarts in-place if currently running so the new community
+  string takes effect immediately.
+  JS re-fetches GET /api/snmp 2 s after a successful POST to update
+  the header badge.
+  [Save] button disabled until any field is dirty (same pattern as
+  Device name and Web session cards).
+
+
+SNMP API CONTRACT
+─────────────────
+  GET  /api/snmp  →  {
+    "enabled":      true,
+    "running":      true,
+    "community":    "public",
+    "sys_name":     "esp32-router",
+    "sys_contact":  "",
+    "sys_location": ""
+  }
+  POST /api/snmp  ←  same shape; omitted fields unchanged.
+
+  /api/status should include:
+    "snmp": { "enabled": true, "running": true }
+  (consumed by status page if a future badge is added there).
+
+  `running` may differ from `enabled` for a brief moment while the
+  agent restarts. The 2-second re-fetch after Save closes that window
+  for the user.
+
+
 DANGER ZONE INTERACTION:
   All 3 actions → showConfirm() modal before any request is sent.
-  Modal title = action name, body = consequence text, [Cancel] / [Confirm] buttons.
-  Confirm button is .btn-danger (red).
-  After confirm: spinner shown in place of button, POST to /api/factory-reset etc.
-  On success: toast notification + (for factory-reset) redirect countdown.
+  Reboot → .btn-secondary (non-destructive restart).
+  Clear password + Factory reset → .btn-danger (red).
+  After confirm: spinner in place of button, POST to /api/reboot etc.
+  On success: toast + (factory-reset) redirect countdown.
 
 OTA UPLOAD FLOW:
-  1. User selects .bin file → filename shown in label span.
-  2. [Upload Firmware] → XHR POST /api/ota-upload with progress bar.
-  3. Progress bar fills to 100%.
-  4. On success: card body replaced by reboot countdown + redirect to /.
-  5. On error: inline error message below bar, bar resets.
-  No page navigation during upload (warn user if they try to leave).
+  1. User selects .bin → filename shown in label span.
+  2. [Upload & reboot] → XHR POST /api/ota-upload with progress bar.
+  3. On success: card body replaced by reboot countdown + redirect.
+  4. On error: inline error message, bar resets.
 
-FILE INPUT STYLING:
-  Native <input type="file"> hidden.
-  Styled <label> wraps it: .bg-input border border-dashed border-border.
-  Hover state: border-accent, background: accent-muted.
-  Selected filename shown in <span> inside label.
+SD CARD BADGE VALUES:
+  — (neutral)    no data yet
+  Recording (success)
+  Card missing (warning)
+  Error (danger)
+
+FIRMWARE UPDATE BADGE VALUES:
+  — (neutral)    no data yet
+  Up to date (success)
+  Update available (accent/info)
+  Error (danger)
+
+WEB SESSION BADGE VALUES:
+  Never (neutral)
+  Active — HH:MM remaining (success when > 5 min, warning when ≤ 5 min)
 
 MOBILE ADJUSTMENTS:
   All grid-cols-2 form groups collapse to 1 column.
   Danger zone buttons are full-width.
-  Password fields: show/hide toggle essential for mobile usability.
+  Card header badges remain in the right slot on all breakpoints.

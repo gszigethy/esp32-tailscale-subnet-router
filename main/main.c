@@ -49,6 +49,7 @@
 #include "esp_core_dump.h"
 #include "nvs.h"
 #include "dns_relay.h"
+#include "snmp_agent.h"
 #include "wifi_networks.h"
 #include "dhcp_reservations.h"
 #include "portmap.h"
@@ -879,6 +880,12 @@ void app_main(void)
      * (re-)bind. Loads enable + upstream-override from NVS itself. */
     dns_relay_init();
     dns_relay_set_state_cb(dns_relay_state_cb);
+
+    /* SNMP agent — SNMPv1/v2c, read-only, binds 0.0.0.0:161.
+     * Loads enable flag + community + sys strings from NVS; starts the
+     * lwIP agent immediately if enabled.  Web UI manages runtime changes
+     * via snmp_agent_apply_live(). */
+    snmp_agent_init();
 
     /* If a core dump was saved on the previous boot, extract a one-line
      * summary (task name + PC + first backtrace frames) and persist it

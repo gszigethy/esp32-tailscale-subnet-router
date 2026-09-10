@@ -240,9 +240,98 @@ The JS `applyStatus()` function expects `GET /api/status` to return:
 }
 ```
 
+The status response should also include a top-level `snmp` object:
+```json
+"snmp": {
+  "enabled": true,
+  "running": true
+}
+```
+This allows a future status-page badge without a separate fetch.
+
 **`reset_reason` string values expected:** `POWER_ON`, `SW_RESET`, `PANIC`, `WDT`, `BROWNOUT`, `FLASH`, `DEEP_SLEEP`
 
 These map to badge colours in `resetReasonDisplay()`. If the C backend uses numeric codes instead, add a translation table in JS — do not change the JS/CSS architecture.
+
+### SNMP agent endpoint
+
+```
+GET  /api/snmp   →  current config + live state
+POST /api/snmp   ←  partial or full update; agent restarts in-place
+```
+
+Response shape:
+```json
+{
+  "enabled":      true,
+  "running":      true,
+  "community":    "public",
+  "sys_name":     "esp32-router",
+  "sys_contact":  "",
+  "sys_location": ""
+}
+```
+
+`running` reflects whether the agent task is currently listening (may differ
+from `enabled` for a brief window after a Save while the agent restarts).
+The UI re-fetches `/api/snmp` 2 s after a successful POST to update the
+Status badge.
+
+### SNMP implementation notes (as built)
+
+The three assumptions this section originally carried all turned out to be
+wrong once the feature was implemented. What actually shipped:
+
+**There is no lwIP SNMP agent to enable.** `CONFIG_LWIP_SNMP` is **not** a
+Kconfig option in ESP-IDF 5.5.3. The lwIP SNMP sources are in the tree but
+nothing compiles them, and every declaration is stripped by `#if LWIP_SNMP`
+guards — putting it in `sdkconfig.defaults` is silently ignored. So
+`components/snmp_agent/` is a self-contained SNMPv1/v2c agent: one FreeRTOS
+task on a BSD socket bound to `0.0.0.0:161`, with its own BER codec. No lwIP
+app headers. The only sdkconfig change in the whole feature is
+`CONFIG_LWIP_MAX_SOCKETS` 24 → 26 (+1 for the agent's UDP socket, +1
+headroom).
+
+**`CONFIG_LWIP_STATS` is a real option, but the wrong tool.** It exists
+(`components/lwip/Kconfig`, `default n`) and was considered for traffic
+counters, but it only yields the global `lwip_stats` struct — there are no
+per-interface byte counters in it. The per-netif counters
+(`netif->mib2_counters`) sit behind `MIB2_STATS`, which defaults to 0 and is
+only set by `LWIP_SNMP` — unreachable, as above. Traffic is therefore counted
+by wrapping the netif function pointers: `netif->input` for RX, and for TX
+`netif->linkoutput` on L2 interfaces or `netif->output` on the WireGuard
+tunnel, which leaves `linkoutput` NULL. Hooking exactly one TX layer per
+interface matters: on Ethernet `output` (etharp) calls `linkoutput`, so
+hooking both double-counts.
+
+**The ifTable is a fixed three-row table, not a `netif_list` walk.** It
+reports `eth0` (ifIndex 1), `wlan0` (2) and `ts0` (3) — deliberately stable
+indices, because a poller graphing ifIndex 2 should not silently start
+graphing a different interface when a netif appears or disappears. The
+interfaces are resolved by esp_netif ifkey (`ETH_DEF`, `WIFI_STA_DEF`) and,
+for the tunnel, by walking `netif_list` for a CGNAT 100.64/10 address — the
+same idiom as `find_wg_netif()` in `main/lwip_route_hook.c`, since the
+WireGuard netif has no fixed ifkey.
+
+**Hooks install lazily.** `snmp_agent_init()` runs from `app_main` before the
+network is up, so no netif exists to wrap yet. A 5 s telemetry timer re-scans
+and installs, and re-arms if a netif is torn down and rebuilt — `ts0` does
+that on every tunnel reconnect.
+
+**Task stack is 4 KB of internal DRAM, not PSRAM.** The task is created with
+plain `xTaskCreate`. The large packet buffers are `static` (BSS) rather than
+stack locals: 2.5 KB of locals in the PDU path overflowed a 4 KB stack during
+development. Making them static costs no extra RAM and is safe because the
+task is single-threaded and the sole caller.
+
+**Backportability to the upstream WiFi-only ESP32 still holds.** The
+component includes no W5500 or `eth_driver.h` headers, and resolves
+interfaces through esp_netif and lwIP only; the one sdkconfig change
+(`CONFIG_LWIP_MAX_SOCKETS`) is a standard knob that applies equally to both
+builds, and the socket baseline differs only in that upstream has no W5500
+driver sockets, so the +2 headroom is conservative either way. On a
+WiFi-only build `ETH_DEF` simply does not resolve, so `eth0` reports
+`ifOperStatus down` with zero counters and everything else works unchanged.
 
 ---
 

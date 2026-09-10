@@ -6,6 +6,19 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.23-W5500-snmpd] — 2026-09-10
+
+Read-only SNMP monitoring, so the router can be graphed by whatever already watches the rest of the network. Device-tested before tagging on the bench router: full walk over the wire from a second machine, traffic counters checked against a known number of pings on both the wired uplink and the Tailscale tunnel, CPU load checked at idle and under a 400 req/s flood, and the parser fuzzed with malformed PDUs.
+
+### Added
+- **SNMPv1/v2c read-only agent**, off by default, one card in the System tab (enable, community, sysName/sysContact/sysLocation) and `GET`/`POST /api/snmp`. Binds UDP `0.0.0.0:161` on every interface, the tailnet included, so a poller on your tailnet can reach it without opening anything on the LAN. GET and GETNEXT only — there is no SET, so nothing can be changed over SNMP.
+- **Standard MIBs, so existing tooling discovers it with no custom MIB file.** MIB-II system and interfaces; HOST-RESOURCES-MIB for per-core CPU load (`hrProcessorLoad`), memory (`hrStorageTable`, internal DRAM and PSRAM) and task count; ENTITY-SENSOR-MIB for the die temperature. The `hrDeviceTable` and `entPhysicalTable` rows those tables are keyed by are served too — without them the values are readable but never auto-discovered.
+- **Live traffic counters on all three interfaces** — `eth0` (ifIndex 1), `wlan0` (2) and `ts0` (3), the Tailscale tunnel included. ESP-IDF 5.5.3 compiles out lwIP's per-interface counters entirely (`netif->mib2_counters` sits behind `MIB2_STATS`, which only `LWIP_SNMP` sets, and that has no Kconfig option), so the agent counts packets by wrapping the netif function pointers instead. Indices are fixed rather than derived from `netif_list`, so a graph pointed at ifIndex 2 keeps meaning `wlan0`; an interface that is down reports `ifOperStatus down` with zero counters rather than vanishing from the table.
+
+### Notes
+- **No SNMPv3 and no SET.** v1/v2c send the community string in clear text; treat it as a password on the wire and prefer polling over the tailnet. A community mismatch is dropped without a reply, so a wrong community looks exactly like the agent being switched off.
+- **One private OID remains**, `1.3.6.1.4.1.99999.1.1.4.0` (`heapMinFreeBytes`, the all-time-low heap watermark) — the only reading with no standard home, since `hrStorageTable` has no watermark column. 99999 is not an IANA-assigned enterprise number, so that tree should not grow.
+
 ## [0.1.23] — 2026-09-10
 
 One microlink fix, found while checking the renewed admin-API token: the *Client version* setting added in 0.1.20 did not actually stick. Device-tested before tagging: manual OTA, the version visible in the admin console with the setting on and gone again with it cleared, six peers direct.
