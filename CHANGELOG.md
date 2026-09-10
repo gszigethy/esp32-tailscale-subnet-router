@@ -6,6 +6,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.19-W5500] — 2026-09-10
+
+First release of this fork. Adds native W5500 SPI Ethernet uplink support
+on top of upstream 0.1.19, plus the per-interface routing and uplink
+master-switch work it depends on.
+
 ### Added
 
 - **W5500 SPI Ethernet uplink.** When a W5500 module is wired to the defined SPI pins and detected at boot, it automatically becomes the WAN uplink. WiFi shifts from STA+AP dual-role to AP-only, giving IoT clients a dedicated 2.4 GHz radio free of uplink contention. Tailscale and NAPT use the ETH interface transparently — no extra configuration needed.
@@ -305,7 +311,8 @@ from a built-in web UI.
 - **Headscale is untested**; only hosted Tailscale has been validated.
 - Tailnet lock is unsupported.
 
-[Unreleased]: https://github.com/Csontikka/esp32-tailscale-subnet-router/compare/v0.1.9...HEAD
+[Unreleased]: https://github.com/gszigethy/esp32-tailscale-subnet-router/compare/v0.1.19-W5500...HEAD
+[0.1.19-W5500]: https://github.com/gszigethy/esp32-tailscale-subnet-router/releases/tag/v0.1.19-W5500
 [0.1.9]: https://github.com/Csontikka/esp32-tailscale-subnet-router/releases/tag/v0.1.9
 [0.1.8]: https://github.com/Csontikka/esp32-tailscale-subnet-router/releases/tag/v0.1.8
 [0.1.7]: https://github.com/Csontikka/esp32-tailscale-subnet-router/releases/tag/v0.1.7

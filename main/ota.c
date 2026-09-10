@@ -24,7 +24,7 @@
 
 static const char *TAG = "ota";
 
-#define OTA_REPO_OWNER       "Csontikka"
+#define OTA_REPO_OWNER       "gszigethy"
 #define OTA_REPO_NAME        "esp32-tailscale-subnet-router"
 #define OTA_ASSET_NAME       "firmware.bin"
 #define OTA_HTTP_RX_BUF      2048

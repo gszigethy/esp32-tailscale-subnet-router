@@ -2925,8 +2925,8 @@
           <p style="margin:0 0 0.5rem 0;"><strong>esp32-tailscale-subnet-router</strong> — a single-board ESP32-S3 router that joins your IoT subnet directly to a Tailscale (or Headscale) tailnet, so remote peers can reach LAN devices behind a CGNAT or a phone hotspot without port forwarding.</p>
           <div class="stat-row"><span class="stat-label">Firmware version</span><span class="stat-value mono" id="about-version">—</span></div>
           <div class="stat-row"><span class="stat-label">Build tag</span>       <span class="stat-value mono" id="about-build-tag" title="—">—</span></div>
-          <div class="stat-row"><span class="stat-label">Source</span><span class="stat-value mono"><a href="https://github.com/Csontikka/esp32-tailscale-subnet-router" target="_blank" rel="noopener" style="color:var(--accent);">github.com/Csontikka/esp32-tailscale-subnet-router</a></span></div>
-          <div class="stat-row"><span class="stat-label">Issues</span><span class="stat-value mono"><a href="https://github.com/Csontikka/esp32-tailscale-subnet-router/issues" target="_blank" rel="noopener" style="color:var(--accent);">github.com/&hellip;/issues</a></span></div>
+          <div class="stat-row"><span class="stat-label">Source</span><span class="stat-value mono"><a href="https://github.com/gszigethy/esp32-tailscale-subnet-router" target="_blank" rel="noopener" style="color:var(--accent);">github.com/gszigethy/esp32-tailscale-subnet-router</a></span></div>
+          <div class="stat-row"><span class="stat-label">Issues</span><span class="stat-value mono"><a href="https://github.com/gszigethy/esp32-tailscale-subnet-router/issues" target="_blank" rel="noopener" style="color:var(--accent);">github.com/&hellip;/issues</a></span></div>
           <div class="stat-row"><span class="stat-label">Tailscale stack</span><span class="stat-value mono"><a href="https://github.com/Csontikka/microlink" target="_blank" rel="noopener" style="color:var(--accent);">Csontikka/microlink</a> (userspace WireGuard + DERP + DISCO)</span></div>
           <div class="stat-row"><span class="stat-label">License</span><span class="stat-value mono">MIT — see LICENSE in the repo</span></div>
           <div class="stat-row" title="Sends a SHA-256 device hash + boot/flash counters + firmware version every 24 h. Never sends SSIDs, IP addresses, MAC addresses, or peer information.">
@@ -6690,7 +6690,7 @@
       var el = document.getElementById('sys-ota-notes');
       if (!el) return;
       el.textContent = 'Loading from GitHub…';
-      fetch('https://api.github.com/repos/Csontikka/esp32-tailscale-subnet-router/releases', { cache: 'no-store' })
+      fetch('https://api.github.com/repos/gszigethy/esp32-tailscale-subnet-router/releases', { cache: 'no-store' })
         .then(function (r) {
           if (r.status === 403) throw new Error('rate-limited');
           if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -7408,7 +7408,7 @@
           'Turn off anonymous telemetry?',
             '<p style="margin:0 0 0.6rem 0;">It is completely anonymous — a salted one-way device hash + boot/flash counters + firmware version, at most once a day. <strong>Never SSIDs, IPs, MAC addresses, the tailnet name, or peers.</strong></p>'
           + '<p style="margin:0 0 0.6rem 0;">Honestly, it is the only way I can spot a <strong>mass crash</strong> after a bad release, and the only hint of whether anyone actually runs this free hobby project. <strong>If you can, please leave it on</strong> — but it is entirely your call.</p>'
-          + '<p style="margin:0;"><a href="https://github.com/Csontikka/esp32-tailscale-subnet-router#telemetry" target="_blank" rel="noopener" style="color:var(--accent);">Exactly what it sends &rarr;</a></p>',
+          + '<p style="margin:0;"><a href="https://github.com/gszigethy/esp32-tailscale-subnet-router#telemetry" target="_blank" rel="noopener" style="color:var(--accent);">Exactly what it sends &rarr;</a></p>',
           function () { applyTelemetry(false); },
           { html: true, confirmText: 'Turn it off anyway', cancelText: 'Keep it on', danger: true }
         );
