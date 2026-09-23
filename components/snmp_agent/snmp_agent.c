@@ -76,11 +76,17 @@
 /* Shared mutable state (protected by s_mutex)                        */
 /* ------------------------------------------------------------------ */
 static SemaphoreHandle_t  s_mutex;
-static char   s_community[256];
-static char   s_sysname[256];
-static char   s_syscontact[256];
-static char   s_syslocation[256];
-static char   s_sysdescr[128];
+/* The web form must retain these while SNMP is disabled, so unlike the
+ * task work buffers they live for the process lifetime. Keep them in PSRAM
+ * nevertheless: users who never enable SNMP must not lose internal heap. */
+typedef struct {
+    char community[256];
+    char sysname[256];
+    char syscontact[256];
+    char syslocation[256];
+    char sysdescr[128];
+} snmp_strings_t;
+static snmp_strings_t *s_strings;
 static bool   s_enabled  = false;
 static bool   s_running  = false;
 static bool   s_starting = false;
@@ -548,11 +554,11 @@ typedef val_t (*getter_fn)(void);
 typedef struct { oid_t oid; vtype_t vt; getter_fn get; } mib_row_t;
 
 /* --- system group --- */
-static val_t g_sysdescr(void)    { return (val_t){ .s = s_sysdescr }; }
+static val_t g_sysdescr(void)    { return (val_t){ .s = s_strings ? s_strings->sysdescr : "" }; }
 static val_t g_sysuptime(void)   { return (val_t){ .u = (uint32_t)(esp_timer_get_time() / 10000ULL) }; }
-static val_t g_syscontact(void)  { return (val_t){ .s = s_syscontact }; }
-static val_t g_sysname(void)     { return (val_t){ .s = s_sysname }; }
-static val_t g_syslocation(void) { return (val_t){ .s = s_syslocation }; }
+static val_t g_syscontact(void)  { return (val_t){ .s = s_strings ? s_strings->syscontact : "" }; }
+static val_t g_sysname(void)     { return (val_t){ .s = s_strings ? s_strings->sysname : "" }; }
+static val_t g_syslocation(void) { return (val_t){ .s = s_strings ? s_strings->syslocation : "" }; }
 static val_t g_sysservices(void) { return (val_t){ .i = 79 }; }
 
 /* --- ifTable scalars --- */
@@ -1097,7 +1103,7 @@ static void snmp_task(void *arg)
 
         xSemaphoreTake(s_mutex, portMAX_DELAY);
         enabled = s_enabled;
-        char comm[256]; strncpy(comm, s_community, sizeof(comm)); comm[255] = '\0';
+        char comm[256]; strncpy(comm, s_strings->community, sizeof(comm)); comm[255] = '\0';
         xSemaphoreGive(s_mutex);
 
         if (!enabled) continue;
@@ -1146,15 +1152,15 @@ static void load_nvs(void)
 {
     nvs_handle_t h;
     if (nvs_open("tsr", NVS_READONLY, &h) != ESP_OK) {
-        snprintf(s_community,  sizeof s_community,  "public");
-        snprintf(s_sysname,    sizeof s_sysname,    "esp32-router");
-        s_syscontact[0] = '\0'; s_syslocation[0] = '\0';
+        snprintf(s_strings->community, sizeof s_strings->community, "public");
+        snprintf(s_strings->sysname, sizeof s_strings->sysname, "esp32-router");
+        s_strings->syscontact[0] = '\0'; s_strings->syslocation[0] = '\0';
         return;
     }
-    nvs_read_str(h, SNMP_NVS_KEY_COMM,     s_community,   sizeof s_community,   "public");
-    nvs_read_str(h, SNMP_NVS_KEY_NAME,     s_sysname,     sizeof s_sysname,     "esp32-router");
-    nvs_read_str(h, SNMP_NVS_KEY_CONTACT,  s_syscontact,  sizeof s_syscontact,  "");
-    nvs_read_str(h, SNMP_NVS_KEY_LOCATION, s_syslocation, sizeof s_syslocation, "");
+    nvs_read_str(h, SNMP_NVS_KEY_COMM,     s_strings->community,   sizeof s_strings->community,   "public");
+    nvs_read_str(h, SNMP_NVS_KEY_NAME,     s_strings->sysname,     sizeof s_strings->sysname,     "esp32-router");
+    nvs_read_str(h, SNMP_NVS_KEY_CONTACT,  s_strings->syscontact,  sizeof s_strings->syscontact,  "");
+    nvs_read_str(h, SNMP_NVS_KEY_LOCATION, s_strings->syslocation, sizeof s_strings->syslocation, "");
     nvs_close(h);
 }
 
@@ -1164,6 +1170,12 @@ static void load_nvs(void)
 void snmp_agent_init(void)
 {
     s_mutex = xSemaphoreCreateMutex();
+    s_strings = heap_caps_calloc(1, sizeof(*s_strings),
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_strings) {
+        ESP_LOGE(TAG, "PSRAM allocation failed for configuration");
+        return;
+    }
 
     uint8_t en = 0;
     nvs_handle_t h;
@@ -1185,7 +1197,7 @@ void snmp_agent_init(void)
             ESP_LOGE(TAG, "MIB table out of order at row %d — walks will truncate", i);
 
     const esp_app_desc_t *desc = esp_app_get_description();
-    snprintf(s_sysdescr, sizeof s_sysdescr, "ESP32 Tailscale Router %s",
+    snprintf(s_strings->sysdescr, sizeof s_strings->sysdescr, "ESP32 Tailscale Router %s",
              desc ? desc->version : "?");
 
     /* The S3's -10..80 C range is accurate to +/-1 C; 20..100 is only +/-2 C. */
@@ -1205,14 +1217,18 @@ void snmp_agent_apply_live(bool enabled,
                            const char *sys_contact,
                            const char *sys_location)
 {
+    if (!s_strings) {
+        ESP_LOGE(TAG, "configuration storage unavailable");
+        return;
+    }
     int sock_to_close = -1;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_enabled = enabled;
-    if (community)    snprintf(s_community,   sizeof s_community,   "%s", community);
-    if (sys_name)     snprintf(s_sysname,     sizeof s_sysname,     "%s", sys_name);
-    if (sys_contact)  snprintf(s_syscontact,  sizeof s_syscontact,  "%s", sys_contact);
-    if (sys_location) snprintf(s_syslocation, sizeof s_syslocation, "%s", sys_location);
+    if (community)    snprintf(s_strings->community,   sizeof s_strings->community,   "%s", community);
+    if (sys_name)     snprintf(s_strings->sysname,     sizeof s_strings->sysname,     "%s", sys_name);
+    if (sys_contact)  snprintf(s_strings->syscontact,  sizeof s_strings->syscontact,  "%s", sys_contact);
+    if (sys_location) snprintf(s_strings->syslocation, sizeof s_strings->syslocation, "%s", sys_location);
     if (!enabled) {
         s_stopping = s_running || s_starting;
         sock_to_close = s_sock;
@@ -1249,12 +1265,21 @@ void snmp_agent_get_config(bool *enabled_out, bool *running_out,
                            char *sys_contact,  size_t cont_sz,
                            char *sys_location, size_t loc_sz)
 {
+    if (!s_strings) {
+        *enabled_out = false;
+        *running_out = false;
+        if (comm_sz) community[0] = '\0';
+        if (name_sz) sys_name[0] = '\0';
+        if (cont_sz) sys_contact[0] = '\0';
+        if (loc_sz)  sys_location[0] = '\0';
+        return;
+    }
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     *enabled_out = s_enabled;
     *running_out = s_running && s_enabled;
-    snprintf(community,    comm_sz, "%s", s_community);
-    snprintf(sys_name,     name_sz, "%s", s_sysname);
-    snprintf(sys_contact,  cont_sz, "%s", s_syscontact);
-    snprintf(sys_location, loc_sz,  "%s", s_syslocation);
+    snprintf(community,    comm_sz, "%s", s_strings->community);
+    snprintf(sys_name,     name_sz, "%s", s_strings->sysname);
+    snprintf(sys_contact,  cont_sz, "%s", s_strings->syscontact);
+    snprintf(sys_location, loc_sz,  "%s", s_strings->syslocation);
     xSemaphoreGive(s_mutex);
 }
