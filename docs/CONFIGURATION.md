@@ -99,6 +99,12 @@ so a wrong community is indistinguishable from the agent being off.
 | **Community** | Shared secret for v1/v2c. There is no v3 — treat this as a password sent in clear text and prefer reaching the device over the tailnet. |
 | **sysName / sysContact / sysLocation** | Served as `1.3.6.1.2.1.1.{5,4,6}.0`. Free text. |
 
+Each text field is limited to 255 UTF-8 bytes. An enabled agent requires a
+nonempty community; if an older installation has an empty community stored,
+the agent stays off at boot until a valid one is saved. The four fields and
+enable flag are saved together, and existing individual NVS keys are read
+for migration.
+
 Only GET and GETNEXT are answered; there is no SET, so nothing can be
 changed over SNMP. GETBULK is accepted but returns one successor per
 varbind, so bulk walks simply take more round trips.

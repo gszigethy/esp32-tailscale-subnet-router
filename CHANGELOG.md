@@ -6,6 +6,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+- SNMP now identifies the WireGuard `wg` netif by name, preventing a CGNAT-addressed WiFi or Ethernet uplink from being hooked as both itself and `ts0`. The router's ACL hooks install before SNMP hooks, and disabling SNMP restores its netif pointers.
+- A stored empty SNMP community disables the listener at boot until a valid community is saved. SNMP settings now use one NVS blob, with legacy keys read for migration; a failed save leaves the live agent unchanged.
+- The SNMP settings endpoint accepts the full four-field form, validates the 255-byte field limit, and the BER varbind buffer can encode every accepted system string.
+- The radio debug endpoint rejects malformed BSSIDs and octets outside the MAC address format instead of truncating them or reporting a false success.
+
 ### Added
 - **Read-only SNMPv1/v2c agent**, off by default, configured from a card in the System tab (`GET`/`POST /api/snmp`). One FreeRTOS task on a BSD socket bound to `0.0.0.0:161` with its own BER codec — not lwIP's agent, which cannot be enabled in ESP-IDF 5.5.3 (`CONFIG_LWIP_SNMP` is not a Kconfig symbol, so setting it in `sdkconfig.defaults` is silently ignored). GET and GETNEXT only; there is no SET, so nothing can be changed over SNMP. Everything lands on standard MIBs so LibreNMS/Zabbix/Observium discover it with no custom MIB file: MIB-II system and interfaces, HOST-RESOURCES-MIB for per-core CPU load, memory and task count, and ENTITY-SENSOR-MIB for the die temperature. Traffic counters cover all three interfaces including the Tailscale tunnel, collected by wrapping the netif function pointers because lwIP's own `mib2_counters` are compiled out without `LWIP_SNMP`. Interfaces are resolved at runtime through `esp_netif` ifkeys, so a board with no Ethernet reports `ifOperStatus down` on `eth0` and works unchanged. One private OID remains — `1.3.6.1.4.1.99999.1.1.4.0` (`heapMinFreeBytes`), the only reading with no standard home.
 

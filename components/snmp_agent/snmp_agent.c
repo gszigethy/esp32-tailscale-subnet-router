@@ -59,6 +59,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 
 #define TAG          "snmp_agent"
 #define SNMP_PORT    161
@@ -69,7 +70,7 @@
 #define CPU_SAMPLE_S  5   /* CPU usage sampling interval (seconds) */
 #define VBL_BUF      2000
 #define PDU_BODY_BUF 2048
-#define VB_BUF        256
+#define VB_BUF        320   /* OID + BER header + 255-byte configured string */
 #define COMM_TLV_BUF  260
 
 /* ------------------------------------------------------------------ */
@@ -87,6 +88,17 @@ typedef struct {
     char sysdescr[128];
 } snmp_strings_t;
 static snmp_strings_t *s_strings;
+
+#define SNMP_CONFIG_MAGIC 0x534e4d31U  /* SNM1 */
+typedef struct {
+    uint32_t magic;
+    uint8_t enabled;
+    uint8_t reserved[3];
+    char community[256];
+    char sysname[256];
+    char syscontact[256];
+    char syslocation[256];
+} snmp_persist_t;
 static bool   s_enabled  = false;
 static bool   s_running  = false;
 static bool   s_starting = false;
@@ -133,6 +145,7 @@ typedef struct {
 #define IF_SLOTS 3
 
 static iftraf_t s_traf[IF_SLOTS];
+static atomic_bool s_hooks_enabled = false;
 
 /* CPU usage (0-100%), updated every CPU_SAMPLE_S seconds. */
 static volatile uint32_t s_cpu0_usage = 0;
@@ -240,14 +253,27 @@ static void hook_netif(int slot, struct netif *n)
                  slot + 1, n->name[0], n->name[1], n->num);
 }
 
-/* Re-scan for interfaces worth counting. Called at init and then from the
- * telemetry tick, so hooks land as soon as each netif exists.            */
+/* Restore only pointers we still own. This runs in the TCP/IP thread, like
+ * installation, after the periodic timer has been stopped. */
+static void unhook_netif(int slot, struct netif *n)
+{
+    if (!n) return;
+    const if_hookset_t *h = &s_hookset[slot];
+    if (n->input == h->input) n->input = s_traf[slot].orig_input;
+    if (n->linkoutput == h->linkoutput)
+        n->linkoutput = s_traf[slot].orig_linkoutput;
+    if (n->output == h->output) n->output = s_traf[slot].orig_output;
+}
+
+/* Re-scan for interfaces worth counting. Called when the agent starts and
+ * then from the telemetry tick, so rebuilt tunnel netifs are covered. */
 static struct netif *find_ts_netif(void);
 
 /* Runs in the lwIP TCP/IP thread — see install_traffic_hooks(). */
 static void install_traffic_hooks_cb(void *ctx)
 {
     (void)ctx;
+    if (!atomic_load(&s_hooks_enabled)) return;
     esp_netif_t *e = esp_netif_get_handle_from_ifkey("ETH_DEF");
     if (e) hook_netif(IF_ETH, (struct netif *)esp_netif_get_netif_impl(e));
 
@@ -257,6 +283,16 @@ static void install_traffic_hooks_cb(void *ctx)
     struct netif *ts = find_ts_netif();
     hook_netif(IF_TS, ts);
     s_ts_up = ts && netif_is_up(ts);
+}
+
+static void uninstall_traffic_hooks_cb(void *ctx)
+{
+    esp_netif_t *e = esp_netif_get_handle_from_ifkey("ETH_DEF");
+    if (e) unhook_netif(IF_ETH, (struct netif *)esp_netif_get_netif_impl(e));
+    esp_netif_t *w = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (w) unhook_netif(IF_WIFI, (struct netif *)esp_netif_get_netif_impl(w));
+    unhook_netif(IF_TS, find_ts_netif());
+    xTaskNotifyGive((TaskHandle_t)ctx);
 }
 
 /* netif_list and the netif function pointers belong to the lwIP thread, and
@@ -276,12 +312,23 @@ static void install_traffic_hooks(void)
     tcpip_callback_with_block(install_traffic_hooks_cb, NULL, 0);
 }
 
+static void uninstall_traffic_hooks(void)
+{
+    /* The block argument waits only for mailbox space, not callback
+     * completion. Wait for the TCP/IP thread to finish restoring pointers
+     * before another SNMP task can start. */
+    if (tcpip_callback_with_block(uninstall_traffic_hooks_cb,
+                                  xTaskGetCurrentTaskHandle(), 1) == ERR_OK)
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    else
+        ESP_LOGE(TAG, "failed to remove traffic hooks");
+}
+
 /* ------------------------------------------------------------------ */
 /* Telemetry tick (5-second periodic timer)                           */
 /* ------------------------------------------------------------------ */
-/* Samples CPU usage and re-arms the traffic hooks. The hook re-scan lives
- * here because snmp_agent_init() runs before the network is brought up —
- * at init time no netif exists yet to wrap.                             */
+/* Samples CPU usage and re-arms traffic hooks when the tunnel netif is
+ * rebuilt after a reconnect. */
 static void telemetry_tick_cb(void *arg)
 {
     install_traffic_hooks();
@@ -341,19 +388,16 @@ static void telemetry_tick_cb(void *arg)
 }
 
 /* ------------------------------------------------------------------ */
-/* Tailscale netif lookup (CGNAT 100.64/10)                          */
+/* Tailscale netif lookup                                              */
 /* ------------------------------------------------------------------ */
-static bool ip_in_cgnat(uint32_t ip_h)
-{
-    return (ip_h & 0xFFC00000U) == 0x64400000U;
-}
-
 static struct netif *find_ts_netif(void)
 {
     for (struct netif *n = netif_list; n; n = n->next) {
-        const ip4_addr_t *a = netif_ip4_addr(n);
-        if (!a || ip4_addr_isany_val(*a)) continue;
-        if (ip_in_cgnat(lwip_ntohl(ip4_addr_get_u32(a)))) return n;
+        /* A WiFi or Ethernet uplink may also receive a CGNAT address.
+         * Hooking it as both the uplink and ts0 makes the wrappers call
+         * each other recursively on the next scan. WireGuard names its
+         * actual tunnel netif "wg". */
+        if (n->name[0] == 'w' && n->name[1] == 'g') return n;
     }
     return NULL;
 }
@@ -1091,6 +1135,7 @@ static void snmp_task(void *arg)
     xSemaphoreGive(s_mutex);
     if (!socket_published) goto done;
 
+    atomic_store(&s_hooks_enabled, true);
     install_traffic_hooks();
     start_telemetry_timer();
     ESP_LOGI(TAG, "listening on 0.0.0.0:161");
@@ -1114,7 +1159,9 @@ static void snmp_task(void *arg)
     }
 
 done:
+    atomic_store(&s_hooks_enabled, false);
     stop_telemetry_timer();
+    uninstall_traffic_hooks();
 
     bool close_sock = sock >= 0;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
@@ -1157,6 +1204,34 @@ static void load_nvs(void)
         s_strings->syscontact[0] = '\0'; s_strings->syslocation[0] = '\0';
         return;
     }
+    size_t sz = 0;
+    if (nvs_get_blob(h, SNMP_NVS_KEY_CONFIG, NULL, &sz) == ESP_OK) {
+        snmp_persist_t *cfg = sz == sizeof(snmp_persist_t)
+            ? heap_caps_malloc(sizeof(*cfg), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+            : NULL;
+        if (cfg && nvs_get_blob(h, SNMP_NVS_KEY_CONFIG, cfg, &sz) == ESP_OK &&
+            sz == sizeof(*cfg) && cfg->magic == SNMP_CONFIG_MAGIC &&
+            memchr(cfg->community, 0, sizeof(cfg->community)) &&
+            memchr(cfg->sysname, 0, sizeof(cfg->sysname)) &&
+            memchr(cfg->syscontact, 0, sizeof(cfg->syscontact)) &&
+            memchr(cfg->syslocation, 0, sizeof(cfg->syslocation))) {
+            s_enabled = cfg->enabled != 0;
+            memcpy(s_strings->community, cfg->community, sizeof(cfg->community));
+            memcpy(s_strings->sysname, cfg->sysname, sizeof(cfg->sysname));
+            memcpy(s_strings->syscontact, cfg->syscontact, sizeof(cfg->syscontact));
+            memcpy(s_strings->syslocation, cfg->syslocation, sizeof(cfg->syslocation));
+            heap_caps_free(cfg);
+            nvs_close(h);
+            return;
+        }
+        if (cfg) heap_caps_free(cfg);
+        ESP_LOGE(TAG, "invalid or unreadable SNMP config blob; disabled");
+        nvs_close(h);
+        return;
+    }
+    uint8_t en = 0;
+    nvs_get_u8(h, SNMP_NVS_KEY_EN, &en);
+    s_enabled = en != 0;
     nvs_read_str(h, SNMP_NVS_KEY_COMM,     s_strings->community,   sizeof s_strings->community,   "public");
     nvs_read_str(h, SNMP_NVS_KEY_NAME,     s_strings->sysname,     sizeof s_strings->sysname,     "esp32-router");
     nvs_read_str(h, SNMP_NVS_KEY_CONTACT,  s_strings->syscontact,  sizeof s_strings->syscontact,  "");
@@ -1169,7 +1244,19 @@ static void load_nvs(void)
 /* ------------------------------------------------------------------ */
 void snmp_agent_init(void)
 {
+    /* Status and diagnostics need the temperature sensor even if SNMP's
+     * configuration allocation fails or the listener is disabled. */
+    temperature_sensor_config_t tcfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
+    if (temperature_sensor_install(&tcfg, &s_temp_sensor) == ESP_OK)
+        temperature_sensor_enable(s_temp_sensor);
+    else
+        s_temp_sensor = NULL;
+
     s_mutex = xSemaphoreCreateMutex();
+    if (!s_mutex) {
+        ESP_LOGE(TAG, "failed to create configuration mutex");
+        return;
+    }
     s_strings = heap_caps_calloc(1, sizeof(*s_strings),
                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_strings) {
@@ -1177,15 +1264,14 @@ void snmp_agent_init(void)
         return;
     }
 
-    uint8_t en = 0;
-    nvs_handle_t h;
-    if (nvs_open("tsr", NVS_READONLY, &h) == ESP_OK) {
-        nvs_get_u8(h, SNMP_NVS_KEY_EN, &en);
-        nvs_close(h);
-    }
-    s_enabled = (en != 0);
-
     load_nvs();
+
+    /* Older firmware accepted an empty community. Fail closed for any such
+     * persisted configuration; POST can set a new community before enabling. */
+    if (s_enabled && s_strings->community[0] == '\0') {
+        ESP_LOGE(TAG, "disabled SNMP: stored community is empty");
+        s_enabled = false;
+    }
 
     /* mib_getnext() is a linear first-greater scan, so s_mib must be sorted.
      * A mis-ordered row silently truncates every walk at that point, which
@@ -1199,13 +1285,6 @@ void snmp_agent_init(void)
     const esp_app_desc_t *desc = esp_app_get_description();
     snprintf(s_strings->sysdescr, sizeof s_strings->sysdescr, "ESP32 Tailscale Router %s",
              desc ? desc->version : "?");
-
-    /* The S3's -10..80 C range is accurate to +/-1 C; 20..100 is only +/-2 C. */
-    temperature_sensor_config_t tcfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
-    if (temperature_sensor_install(&tcfg, &s_temp_sensor) == ESP_OK)
-        temperature_sensor_enable(s_temp_sensor);
-    else
-        s_temp_sensor = NULL;
 
     if (!s_enabled) { ESP_LOGI(TAG, "disabled"); return; }
     start_snmp_task_if_needed();
@@ -1243,8 +1322,44 @@ void snmp_agent_apply_live(bool enabled,
     if (enabled) start_snmp_task_if_needed();
 }
 
+esp_err_t snmp_agent_save_config(bool enabled,
+                                 const char *community,
+                                 const char *sys_name,
+                                 const char *sys_contact,
+                                 const char *sys_location)
+{
+    if (!s_strings || !community || (enabled && !community[0]) || !sys_name ||
+        !sys_contact || !sys_location ||
+        strnlen(community, 256) >= 256 || strnlen(sys_name, 256) >= 256 ||
+        strnlen(sys_contact, 256) >= 256 || strnlen(sys_location, 256) >= 256)
+        return ESP_ERR_INVALID_ARG;
+
+    snmp_persist_t *cfg = heap_caps_calloc(1, sizeof(*cfg),
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!cfg) return ESP_ERR_NO_MEM;
+    cfg->magic = SNMP_CONFIG_MAGIC;
+    cfg->enabled = enabled ? 1 : 0;
+    strcpy(cfg->community, community);
+    strcpy(cfg->sysname, sys_name);
+    strcpy(cfg->syscontact, sys_contact);
+    strcpy(cfg->syslocation, sys_location);
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open("tsr", NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_blob(h, SNMP_NVS_KEY_CONFIG, cfg, sizeof(*cfg));
+        if (err == ESP_OK) err = nvs_commit(h);
+        nvs_close(h);
+    }
+    heap_caps_free(cfg);
+    if (err == ESP_OK)
+        snmp_agent_apply_live(enabled, community, sys_name, sys_contact, sys_location);
+    return err;
+}
+
 bool snmp_agent_is_enabled(void)
 {
+    if (!s_mutex) return false;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     bool enabled = s_enabled;
     xSemaphoreGive(s_mutex);
@@ -1253,6 +1368,7 @@ bool snmp_agent_is_enabled(void)
 
 bool snmp_agent_is_running(void)
 {
+    if (!s_mutex) return false;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     bool running = s_running && s_enabled;
     xSemaphoreGive(s_mutex);

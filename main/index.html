@@ -7259,6 +7259,18 @@
       });
       if (!btn) return;
       btn.addEventListener('click', function () {
+        var community = document.getElementById('sys-snmp-community').value;
+        if (document.getElementById('sys-snmp-en').checked && !community) {
+          showToast('error', 'Invalid community', 'Enter a nonempty SNMP community.', 4000);
+          return;
+        }
+        var tooLong = fields.some(function (id) {
+          return new TextEncoder().encode(document.getElementById(id).value).length > 255;
+        });
+        if (tooLong) {
+          showToast('error', 'Field too long', 'SNMP fields are limited to 255 UTF-8 bytes.', 4000);
+          return;
+        }
         btn.disabled    = true;
         btn.textContent = 'Saving…';
         apiFetch('/api/snmp', {
