@@ -17,7 +17,7 @@
 
 ---
 
-> **Status — early access (`v0.1.9`).** Runs daily on the reference
+> **Status — early access (`v0.1.27`).** Runs daily on the reference
 > ESP32-S3 hardware and the core paths (WiFi NAT, Tailscale subnet
 > routing, DERP fallback, exit nodes, firewall) are exercised
 > continuously. Treat it as a capable hobby build, not a hardened
@@ -474,8 +474,8 @@ This is the *entire* payload — nothing else leaves the device:
 ```json
 {
   "dh": "a1b2c3d4e5f6071839",
-  "v":  "0.1.9",
-  "bd": "2026-05-31",
+  "v":  "0.1.27",
+  "bd": "2026-09-16",
   "et": "heartbeat",
   "bc": 276,
   "fc": 158,
@@ -485,6 +485,10 @@ This is the *entire* payload — nothing else leaves the device:
   "ch": "S3r0",
   "fh": 53707,
   "ac": 42,
+  "rcs": 0,
+  "rct": 1,
+  "rcd": 0,
+  "rcr": 0,
   "ts": "up"
 }
 ```
@@ -492,17 +496,21 @@ This is the *entire* payload — nothing else leaves the device:
 | Field | Meaning | Example |
 |---|---|---|
 | `dh` | anonymous device ID — 16-hex `SHA-256(WiFi MAC + fixed salt)` plus a 2-hex integrity check (18 hex total). One-way; it can't be turned back into your MAC | `a1b2c3d4e5f6071839` |
-| `v`  | firmware version | `0.1.9` |
-| `bd` | firmware build date | `2026-05-31` |
+| `v`  | firmware version | `0.1.27` |
+| `bd` | firmware build date | `2026-09-16` |
 | `et` | event type — `boot`, `heartbeat`, or a crash report | `heartbeat` |
 | `bc` | total boot count | `276` |
 | `fc` | total firmware-flash count | `158` |
 | `up` | uptime, seconds | `90074` |
 | `rr` | reset-reason code (ESP-IDF reason, or `100` = new firmware / `101` = rollback) | `1` |
-| `rw` | short reboot-reason tag, or empty | `ch-realign 11->1` |
+| `rw` | short reboot-reason tag for deliberate firmware-initiated restarts, or empty (current firmware tags none; kept for the dashboard) | `` |
 | `ch` | chip model + silicon revision | `S3r0` |
 | `fh` | free heap at send time, bytes | `53707` |
 | `ac` | Tailscale (re)connect count this session | `42` |
+| `rcs` | tunnel reconnects since boot caused by the control-plane stream watchdog | `0` |
+| `rct` | … caused by a control-plane transport error | `1` |
+| `rcd` | … caused by the DERP receive watchdog | `0` |
+| `rcr` | … caused by the DERP retry path | `0` |
 | `ts` | Tailscale toggle — `up` or `off` (just the switch; **no peers, no tailnet name**) | `up` |
 | `cr` | crash signature — **only** added to a crash report | `StoreProhibited @ ml_derp_tx` |
 
