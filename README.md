@@ -156,7 +156,7 @@ traffic you route through it.)*
   and a MAC denylist.
 - **Robust by design** — encrypted config backup/restore, OTA updates
   (with an opt-in beta channel for pre-releases), per-sink (console + SD)
-  log levels, auto AP-channel realign on STA roam, and pre-crash log capture.
+  log levels, the AP following the uplink channel on a STA roam without a reboot, and pre-crash log capture.
 - **Anonymous telemetry (on by default, one toggle to opt out)** — a tiny
   daily payload: a salted one-way device hash + boot/flash counters +
   firmware/chip/uptime + reboot/crash cause. Never SSIDs, IPs, MACs,
@@ -442,9 +442,11 @@ key); disable it for the tailnet or pre-authorize the node.
 
 ## Known limitations
 
-- **Single radio.** STA and AP share one 2.4 GHz radio and channel. If
-  the upstream AP is on a different channel after a roam, throughput
-  collapses until the device realigns (it auto-reboots to do so).
+- **Single radio.** STA and AP share one 2.4 GHz radio and channel. When
+  the uplink moves to another channel (roam, band steering, auto-channel)
+  the softAP follows it in place; AP clients stay associated and see a
+  few seconds of gap while the uplink re-associates, and the tunnel
+  reconnects. No reboot is involved.
 - **Throughput.** This is an MCU doing userspace crypto + NAT; expect
   roughly **0.3–1.4 Mbit/s** through the tunnel (plain STA highest, direct
   exit node mid, DERP-relayed exit node lowest), not gigabit. Plenty for

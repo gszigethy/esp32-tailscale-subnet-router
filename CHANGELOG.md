@@ -6,6 +6,20 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.27-W5500] — 2026-09-23
+
+Merges upstream v0.1.27 into the W5500 fork. The WiFi softAP now follows a
+roaming STA uplink's channel without rebooting, and microlink consolidates its
+Hostinfo construction. The fork retains its Ethernet-aware routing and web
+endpoints.
+
+### Fixed
+- **SNMP string encoding now bounds the source scan by the output capacity.**
+  This removes the unprovable unbounded `strlen()` path flagged by static
+  analysis and keeps the BER length arithmetic safe.
+- **SNMP independently latches the Ethernet and WiFi MAC caches.** A WiFi-only
+  board no longer repeatedly queries its WiFi MAC because Ethernet is absent.
+
 ## [0.1.26-W5500] — 2026-09-10
 
 Upstream 0.1.26 merged in — a submodule bump and nothing else, so this is a small one — plus a thread-safety fix in the SNMP traffic hooks that reviewing upstream's teardown work brought to light. Device-tested on the bench router: full SNMP walk over the wire, wired uplink and tunnel counters both tracking, die temperature reading, hooks re-arming after the tunnel comes up.
@@ -13,6 +27,16 @@ Upstream 0.1.26 merged in — a submodule bump and nothing else, so this is a sm
 ### Fixed
 - **Every reconnect still leaked ~15 KB of PSRAM** (microlink `4843ab0` → `70cfeba`, upstream 0.1.26). The lwIP `struct wireguard_device` behind the tunnel netif — every peer's keypairs and handshake state, ~14.7 KB — was never freed: teardown released only the 260-byte netif wrapped around it. It is now freed on stop with the key material zeroed first, and packets or peer updates still queued at destroy are freed with it.
 - **The SNMP traffic hooks walked lwIP's netif list from the wrong thread.** `CONFIG_LWIP_TCPIP_CORE_LOCKING` is off in this build, so `netif_list` and the netif function pointers may only be touched from the TCP/IP thread. The five-second telemetry tick did it from the esp_timer task, which left a window where the tunnel netif could be removed and freed between `find_ts_netif()` returning it and the hook being written into it — a write to freed memory on a reconnect landing in exactly that window. The scan now runs inside the TCP/IP thread via `tcpip_callback_with_block()`, the same idiom microlink uses for its own netif bring-up, and non-blocking because an esp_timer callback must not block: a full mailbox just means the next tick retries, and the install is idempotent.
+
+## [0.1.27] — 2026-09-16
+
+The router stops rebooting on uplink channel changes, and a tidy-up inside microlink. Device-tested before tagging: manual OTA, a forced roam of the uplink from channel 11 to channel 1 and back with the AP client watched from its own side (no reboot, client stayed associated, tunnel back within half a minute, heap flat across six roams), six peers direct, an AP client through the router.
+
+### Fixed
+- **The router no longer reboots when its uplink changes channel.** The old "ch-realign" logic rebooted on any mismatch between the softAP's configured channel and the channel the STA had just connected on, on the assumption that a single radio would otherwise time-share and collapse throughput. Measured on the reference router with a forced roam from a channel-11 to a channel-1 uplink: the WiFi driver moves the softAP to the STA's channel by itself, the AP client stayed associated with its address, the only gap was ~5 s of uplink DHCP, and throughput was unchanged. Behind an uplink that hops channels (band steering, auto-channel) the reboot fired on every hop — 27 times in six days on one device in the telemetry — dropping every AP client and the tunnel for 30–40 s each time, for nothing. Now: the learned channel is still saved so the next boot starts aligned, a warning is logged, and `/api/status` reports the channel the radio is actually on (`ap.channel`; the boot value is `ap.cfg_channel`). Re-applying the AP config live was measured too and is not an option: the netif restart clears NAPT and the ACL hooks, so AP clients lose the internet until a reboot.
+
+### Changed
+- **One Hostinfo builder** (microlink, internal). The four messages that carry a Hostinfo — RegisterRequest, the initial MapRequest, the long-poll MapRequest, the endpoint update — built it from four hand-copied blocks, which is how `IPNVersion` ended up in only two of them (fixed by hand in 0.5.10 / 0.1.23). They now share one `build_hostinfo()` and cannot drift. No change on the wire for the three map-family messages; the RegisterRequest's Hostinfo only has its keys in the same order as the others and carries the NAT flag when STUN already ran. Verified: admin API hostname / OS / routes unchanged, client version round trip and endpoint updates on both reference devices.
 
 ## [0.1.26] — 2026-09-10
 

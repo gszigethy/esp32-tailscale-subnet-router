@@ -393,7 +393,13 @@ static esp_err_t status_handler(httpd_req_t *req)
     wifi_config_t ap_cfg;
     if (esp_wifi_get_config(WIFI_IF_AP, &ap_cfg) == ESP_OK) {
         cJSON_AddStringToObject(ap, "ssid",    (const char *)ap_cfg.ap.ssid);
-        cJSON_AddNumberToObject(ap, "channel", ap_cfg.ap.channel);
+        /* Single radio: the softAP runs on the STA's channel whatever the AP
+         * config says (the config only picks the boot-time channel), so report
+         * the channel the radio is actually on; cfg_channel is the boot value. */
+        uint8_t prim = 0; wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
+        bool have_radio = (esp_wifi_get_channel(&prim, &sec) == ESP_OK && prim >= 1 && prim <= 14);
+        cJSON_AddNumberToObject(ap, "channel", have_radio ? prim : ap_cfg.ap.channel);
+        cJSON_AddNumberToObject(ap, "cfg_channel", ap_cfg.ap.channel);
     }
     if (esp_wifi_get_mac(WIFI_IF_AP, mac) == ESP_OK) {
         snprintf(mac_str, sizeof mac_str, "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -1322,6 +1328,7 @@ static esp_err_t network_scan_result_handler(httpd_req_t *req)
         cJSON_AddStringToObject(e, "ssid",    (const char *)s_scan_cache[i].ssid);
         cJSON_AddNumberToObject(e, "rssi",    s_scan_cache[i].rssi);
         cJSON_AddNumberToObject(e, "channel", s_scan_cache[i].primary);
+        { char bs[18]; snprintf(bs, sizeof bs, "%02x:%02x:%02x:%02x:%02x:%02x", s_scan_cache[i].bssid[0], s_scan_cache[i].bssid[1], s_scan_cache[i].bssid[2], s_scan_cache[i].bssid[3], s_scan_cache[i].bssid[4], s_scan_cache[i].bssid[5]); cJSON_AddStringToObject(e, "bssid", bs); }
         cJSON_AddStringToObject(e, "auth",    wifi_authmode_str(s_scan_cache[i].authmode));
         cJSON_AddItemToArray(arr, e);
     }
@@ -3419,6 +3426,66 @@ static const httpd_uri_t uri_system_debug_ts_reconnect = {
     .uri = "/api/debug/ts-reconnect", .method = HTTP_POST, .handler = system_debug_ts_reconnect_handler,
 };
 
+/* Bench hook (auth-gated, like /api/debug/ts-reconnect): radio state, and a
+ * forced STA roam by pinning a BSSID -- the gate for the channel-follow test. */
+static esp_err_t system_debug_radio_get_handler(httpd_req_t *req)
+{
+    if (require_auth(req) != ESP_OK) return ESP_FAIL;
+    uint8_t prim = 0; wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
+    esp_wifi_get_channel(&prim, &sec);
+    wifi_ap_record_t ai; bool have = (esp_wifi_sta_get_ap_info(&ai) == ESP_OK);
+    wifi_config_t ap_cfg; esp_wifi_get_config(WIFI_IF_AP, &ap_cfg);
+    wifi_config_t sta_cfg; esp_wifi_get_config(WIFI_IF_STA, &sta_cfg);
+    char resp[256];
+    snprintf(resp, sizeof resp,
+             "{\"radio_ch\":%u,\"second\":%d,\"sta_ch\":%d,\"sta_bssid\":\"%02x:%02x:%02x:%02x:%02x:%02x\",\"sta_rssi\":%d,"
+             "\"ap_cfg_ch\":%u,\"pin_set\":%s}",
+             (unsigned)prim, (int)sec, have ? (int)ai.primary : -1,
+             have ? ai.bssid[0] : 0, have ? ai.bssid[1] : 0, have ? ai.bssid[2] : 0, have ? ai.bssid[3] : 0, have ? ai.bssid[4] : 0, have ? ai.bssid[5] : 0,
+             have ? (int)ai.rssi : 0, (unsigned)ap_cfg.ap.channel, sta_cfg.sta.bssid_set ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, resp);
+}
+static esp_err_t system_debug_radio_post_handler(httpd_req_t *req)
+{
+    if (require_auth(req) != ESP_OK) return ESP_FAIL;
+    char buf[128];
+    if (recv_body(req, buf, sizeof buf, NULL) != ESP_OK) return ESP_FAIL;
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON"); return ESP_FAIL; }
+    const cJSON *b = cJSON_GetObjectItem(root, "bssid");
+    bool reconnect = false; esp_err_t err = ESP_OK;
+    if (cJSON_IsString(b)) {
+        wifi_config_t cfg;
+        err = esp_wifi_get_config(WIFI_IF_STA, &cfg);
+        unsigned m[6];
+        if (err == ESP_OK && b->valuestring[0] && sscanf(b->valuestring, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) == 6) {
+            for (int i = 0; i < 6; i++) cfg.sta.bssid[i] = (uint8_t)m[i];
+            cfg.sta.bssid_set = 1; reconnect = true;
+        } else if (err == ESP_OK && !b->valuestring[0]) {
+            cfg.sta.bssid_set = 0; memset(cfg.sta.bssid, 0, 6); reconnect = true;
+        }
+        if (reconnect) {
+            err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
+            ESP_LOGW(TAG, "debug radio: STA BSSID pin %s (%s) -- disconnecting to roam",
+                     cfg.sta.bssid_set ? b->valuestring : "cleared", esp_err_to_name(err));
+            if (err == ESP_OK) esp_wifi_disconnect();   /* STA_DISCONNECTED handler reconnects */
+        }
+    }
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    char resp[96];
+    snprintf(resp, sizeof resp, "{\"ok\":%s,\"reconnect\":%s}",
+             err == ESP_OK ? "true" : "false", reconnect ? "true" : "false");
+    return httpd_resp_sendstr(req, resp);
+}
+static const httpd_uri_t uri_system_debug_radio_get = {
+    .uri = "/api/debug/radio", .method = HTTP_GET, .handler = system_debug_radio_get_handler,
+};
+static const httpd_uri_t uri_system_debug_radio_post = {
+    .uri = "/api/debug/radio", .method = HTTP_POST, .handler = system_debug_radio_post_handler,
+};
+
 static const httpd_uri_t uri_system_save = {
     .uri = "/api/system", .method = HTTP_POST, .handler = system_save_handler,
 };
@@ -5015,6 +5082,8 @@ void web_ui_init(void)
     reg_uri(server, &uri_system_diag);
     reg_uri(server, &uri_system_debug_crash);
     reg_uri(server, &uri_system_debug_ts_reconnect);
+    reg_uri(server, &uri_system_debug_radio_get);
+    reg_uri(server, &uri_system_debug_radio_post);
     reg_uri(server, &uri_auth_status);
     reg_uri(server, &uri_auth_login);
     reg_uri(server, &uri_auth_logout);
