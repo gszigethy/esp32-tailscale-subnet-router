@@ -67,6 +67,10 @@
 #define MAX_OID     16
 #define MAX_TASKS    52   /* enough for a busy ESP-IDF system */
 #define CPU_SAMPLE_S  5   /* CPU usage sampling interval (seconds) */
+#define VBL_BUF      2000
+#define PDU_BODY_BUF 2048
+#define VB_BUF        256
+#define COMM_TLV_BUF  260
 
 /* ------------------------------------------------------------------ */
 /* Shared mutable state (protected by s_mutex)                        */
@@ -79,7 +83,22 @@ static char   s_syslocation[256];
 static char   s_sysdescr[128];
 static bool   s_enabled  = false;
 static bool   s_running  = false;
+static bool   s_starting = false;
+static bool   s_stopping = false;
 static int    s_sock     = -1;
+
+/* These are deliberately task-owned: keeping them static would charge every
+ * router roughly 8.5 KB of scarce internal RAM even when SNMP is disabled.
+ * The task allocates this one block from PSRAM only while it is running and
+ * frees it before it exits. */
+typedef struct {
+    uint8_t rx[PKT_BUF];
+    uint8_t tx[PKT_BUF];
+    uint8_t vbl_buf[VBL_BUF];
+    uint8_t pdu_body[PDU_BODY_BUF];
+    uint8_t vb[VB_BUF];
+    uint8_t comm_tlv[COMM_TLV_BUF];
+} snmp_buffers_t;
 
 /* ------------------------------------------------------------------ */
 /* Hardware / telemetry state (read-only after init, no mutex needed) */
@@ -113,6 +132,8 @@ static iftraf_t s_traf[IF_SLOTS];
 static volatile uint32_t s_cpu0_usage = 0;
 static volatile uint32_t s_cpu1_usage = 0;
 static esp_timer_handle_t s_cpu_timer  = NULL;
+/* Set only by install_traffic_hooks_cb() in the TCP/IP thread. */
+static volatile bool s_ts_up = false;
 
 /* Sampling state for CPU (lives only in the timer callback). */
 static uint32_t s_prev_idle0_us   = 0;
@@ -227,7 +248,9 @@ static void install_traffic_hooks_cb(void *ctx)
     esp_netif_t *w = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     if (w) hook_netif(IF_WIFI, (struct netif *)esp_netif_get_netif_impl(w));
 
-    hook_netif(IF_TS, find_ts_netif());
+    struct netif *ts = find_ts_netif();
+    hook_netif(IF_TS, ts);
+    s_ts_up = ts && netif_is_up(ts);
 }
 
 /* netif_list and the netif function pointers belong to the lwIP thread, and
@@ -257,14 +280,22 @@ static void telemetry_tick_cb(void *arg)
 {
     install_traffic_hooks();
 
-    static TaskStatus_t tasks[MAX_TASKS];
+    /* A static snapshot costs about 2 KB of internal DRAM permanently. The
+     * timer only exists while SNMP is running, so take a short-lived PSRAM
+     * snapshot instead. */
+    TaskStatus_t *tasks = heap_caps_malloc(sizeof(*tasks) * MAX_TASKS,
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!tasks) {
+        ESP_LOGW(TAG, "CPU sample skipped: no PSRAM");
+        return;
+    }
     uint32_t total_us = 0;   /* wall-time snapshot (≈ esp_timer_get_time) */
     UBaseType_t n = uxTaskGetSystemState(tasks, MAX_TASKS, &total_us);
 
     /* uxTaskGetSystemState returns 0 if MAX_TASKS is too small to hold the
      * whole system. Bail rather than treat an empty array as "no idle
      * time", which would report a permanent 100%. */
-    if (n == 0) return;
+    if (n == 0) { heap_caps_free(tasks); return; }
 
     uint32_t idle0_us = 0, idle1_us = 0;
     bool found0 = false, found1 = false;
@@ -276,7 +307,10 @@ static void telemetry_tick_cb(void *arg)
             else              { idle0_us = tasks[i].ulRunTimeCounter; found0 = true; }
         }
     }
-    if (!found0) return;          /* names changed under us — keep last values */
+    if (!found0) {                /* names changed under us — keep last values */
+        heap_caps_free(tasks);
+        return;
+    }
 
     uint64_t wall_us = (uint64_t)esp_timer_get_time();
     uint64_t dw = wall_us - s_prev_wall_us;
@@ -297,6 +331,7 @@ static void telemetry_tick_cb(void *arg)
                      : (di1 >= dw) ? 0 : (uint32_t)(100 - (uint64_t)di1 * 100 / dw);
     }
     (void)total_us;
+    heap_caps_free(tasks);
 }
 
 /* ------------------------------------------------------------------ */
@@ -571,8 +606,9 @@ static val_t g_wifi_ifoperstatus(void)
 }
 static val_t g_ts_ifoperstatus(void)
 {
-    struct netif *ts = find_ts_netif();
-    return (val_t){ .i = (ts && netif_is_up(ts)) ? 1 : 2 };
+    /* The SNMP task must not walk netif_list: it belongs to the TCP/IP
+     * thread and ts0 can be rebuilt underneath a reconnect. */
+    return (val_t){ .i = s_ts_up ? 1 : 2 };
 }
 
 /* ifInOctets / ifInUcastPkts / ifOutOctets / ifOutUcastPkts, per interface */
@@ -823,7 +859,7 @@ static int encode_val(uint8_t *b, int cap, int row)
 
 static int process_pdu(const uint8_t *in, int inlen,
                        uint8_t *out, int outcap,
-                       const char *community)
+                       const char *community, snmp_buffers_t *buf)
 {
     const uint8_t *p = in;
     int rem = inlen, len;
@@ -868,7 +904,7 @@ static int process_pdu(const uint8_t *in, int inlen,
     if (ber_tlv(&p, &rem, &len) != 0x30) return -1;
     rem = len;
 
-    static uint8_t vbl_buf[2000];
+    uint8_t *vbl_buf = buf->vbl_buf;
     int vbl_pos = 0;
     bool get_next = (pdu_tag == 0xa1 || pdu_tag == 0xa5);
 
@@ -886,10 +922,9 @@ static int process_pdu(const uint8_t *in, int inlen,
 
         int row = get_next ? mib_getnext(arc, an) : mib_get(arc, an);
 
-        /* static: task is single-threaded, no re-entrancy concern */
-        static uint8_t vb[256]; int vbpos = 0;
+        uint8_t *vb = buf->vb; int vbpos = 0;
         if (row < 0) {
-            int oidhdrlen = ber_enc_oid(vb + vbpos, sizeof(vb) - vbpos, arc, an);
+            int oidhdrlen = ber_enc_oid(vb + vbpos, VB_BUF - vbpos, arc, an);
             if (!oidhdrlen) return -1;
             vbpos += oidhdrlen;
             /* v2c exception tags. A GETNEXT that ran off the end of the MIB
@@ -900,34 +935,35 @@ static int process_pdu(const uint8_t *in, int inlen,
             if (version >= 1) { vb[vbpos++] = get_next ? 0x82 : 0x80; vb[vbpos++] = 0x00; }
             else              { vb[vbpos++] = 0x05; vb[vbpos++] = 0x00; }
         } else {
-            int oidhdrlen = ber_enc_oid(vb + vbpos, sizeof(vb) - vbpos,
+            int oidhdrlen = ber_enc_oid(vb + vbpos, VB_BUF - vbpos,
                                         s_mib[row].oid.arc, s_mib[row].oid.n);
             if (!oidhdrlen) return -1;
             vbpos += oidhdrlen;
-            int valen = encode_val(vb + vbpos, (int)sizeof(vb) - vbpos, row);
+            int valen = encode_val(vb + vbpos, VB_BUF - vbpos, row);
             if (!valen) return -1;
             vbpos += valen;
         }
         uint8_t hdr[4]; int hl = seq_hdr(hdr, sizeof(hdr), 0x30, vbpos);
-        if (!hl || vbl_pos + hl + vbpos > (int)sizeof(vbl_buf)) return -1;
+        if (!hl || vbl_pos + hl + vbpos > VBL_BUF) return -1;
         memcpy(vbl_buf + vbl_pos, hdr, hl); vbl_pos += hl;
         memcpy(vbl_buf + vbl_pos, vb, vbpos); vbl_pos += vbpos;
     }
 
-    static uint8_t pdu_body[2048]; int pb = 0;
+    uint8_t *pdu_body = buf->pdu_body; int pb = 0;
     memcpy(pdu_body, rid_tlv, req_id_tlen);
     pb += req_id_tlen;
     pdu_body[pb++] = 0x02; pdu_body[pb++] = 0x01; pdu_body[pb++] = 0x00;
     pdu_body[pb++] = 0x02; pdu_body[pb++] = 0x01; pdu_body[pb++] = 0x00;
     uint8_t vbl_hdr[4]; int vhl = seq_hdr(vbl_hdr, sizeof(vbl_hdr), 0x30, vbl_pos);
-    if (!vhl || pb + vhl + vbl_pos > (int)sizeof(pdu_body)) return -1;
+    if (!vhl || pb + vhl + vbl_pos > PDU_BODY_BUF) return -1;
     memcpy(pdu_body + pb, vbl_hdr, vhl); pb += vhl;
     memcpy(pdu_body + pb, vbl_buf, vbl_pos); pb += vbl_pos;
 
     uint8_t pdu_hdr[4]; int phl = seq_hdr(pdu_hdr, sizeof(pdu_hdr), 0xa2, pb);
     if (!phl) return -1;
 
-    static uint8_t comm_tlv[260]; int ctlen = ber_enc_str(comm_tlv, sizeof(comm_tlv), community);
+    uint8_t *comm_tlv = buf->comm_tlv;
+    int ctlen = ber_enc_str(comm_tlv, COMM_TLV_BUF, community);
     if (!ctlen) return -1;
 
     uint8_t ver_tlv[3] = { 0x02, 0x01, (uint8_t)version };
@@ -951,51 +987,147 @@ static int process_pdu(const uint8_t *in, int inlen,
 /* ------------------------------------------------------------------ */
 /* SNMP task                                                          */
 /* ------------------------------------------------------------------ */
+static void stop_telemetry_timer(void)
+{
+    if (!s_cpu_timer) return;
+    esp_timer_stop(s_cpu_timer);
+    esp_timer_delete(s_cpu_timer);
+    s_cpu_timer = NULL;
+    s_cpu0_usage = 0;
+    s_cpu1_usage = 0;
+    s_ts_up = false;
+}
+
+static void start_telemetry_timer(void)
+{
+    s_prev_wall_us = (uint64_t)esp_timer_get_time();
+    s_prev_idle0_us = 0;
+    s_prev_idle1_us = 0;
+    esp_timer_create_args_t targs = {
+        .callback = telemetry_tick_cb,
+        .name     = "snmp_tick",
+    };
+    if (esp_timer_create(&targs, &s_cpu_timer) != ESP_OK ||
+        esp_timer_start_periodic(s_cpu_timer,
+                                 (uint64_t)CPU_SAMPLE_S * 1000000ULL) != ESP_OK) {
+        ESP_LOGW(TAG, "CPU telemetry timer unavailable");
+        if (s_cpu_timer) {
+            esp_timer_delete(s_cpu_timer);
+            s_cpu_timer = NULL;
+        }
+    }
+}
+
+static void snmp_task(void *arg);
+
+/* The caller has already set s_starting while holding s_mutex. */
+static void start_snmp_task_reserved(void)
+{
+    if (xTaskCreate(snmp_task, "snmp_agent", TASK_STACK, NULL,
+                    tskIDLE_PRIORITY + 2, NULL) == pdPASS)
+        return;
+
+    ESP_LOGE(TAG, "failed to create task");
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_starting = false;
+    xSemaphoreGive(s_mutex);
+}
+
+static void start_snmp_task_if_needed(void)
+{
+    bool start = false;
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (s_enabled && !s_running && !s_starting && !s_stopping) {
+        s_starting = true;
+        start = true;
+    }
+    xSemaphoreGive(s_mutex);
+    if (start) start_snmp_task_reserved();
+}
+
 static void snmp_task(void *arg)
 {
     (void)arg;
-    static uint8_t rx[PKT_BUF], tx[PKT_BUF];
+    int sock = -1;
+    bool socket_published = false;
+    snmp_buffers_t *buf = heap_caps_malloc(sizeof(*buf),
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        ESP_LOGE(TAG, "PSRAM allocation failed");
+        goto done;
+    }
 
-    s_sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (s_sock < 0) { ESP_LOGE(TAG, "socket() failed"); vTaskDelete(NULL); return; }
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    bool enabled = s_enabled;
+    xSemaphoreGive(s_mutex);
+    if (!enabled) goto done;
+
+    sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) { ESP_LOGE(TAG, "socket() failed"); goto done; }
 
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
         .sin_port   = htons(SNMP_PORT),
         .sin_addr.s_addr = htonl(INADDR_ANY),
     };
-    if (bind(s_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         ESP_LOGE(TAG, "bind(:161) failed");
-        close(s_sock); s_sock = -1; vTaskDelete(NULL); return;
+        goto done;
     }
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
-    s_running = true;
+    if (s_enabled) {
+        s_sock = sock;
+        s_running = true;
+        s_starting = false;
+        socket_published = true;
+    }
     xSemaphoreGive(s_mutex);
+    if (!socket_published) goto done;
+
+    install_traffic_hooks();
+    start_telemetry_timer();
     ESP_LOGI(TAG, "listening on 0.0.0.0:161");
 
     while (true) {
         struct sockaddr_in src; socklen_t srclen = sizeof(src);
-        int rlen = recvfrom(s_sock, rx, sizeof(rx), 0,
+        int rlen = recvfrom(sock, buf->rx, sizeof(buf->rx), 0,
                             (struct sockaddr *)&src, &srclen);
         if (rlen < 0) break;
 
         xSemaphoreTake(s_mutex, portMAX_DELAY);
-        bool enabled = s_enabled;
+        enabled = s_enabled;
         char comm[256]; strncpy(comm, s_community, sizeof(comm)); comm[255] = '\0';
         xSemaphoreGive(s_mutex);
 
         if (!enabled) continue;
 
-        int rsp = process_pdu(rx, rlen, tx, sizeof(tx), comm);
+        int rsp = process_pdu(buf->rx, rlen, buf->tx, sizeof(buf->tx), comm, buf);
         if (rsp > 0)
-            sendto(s_sock, tx, rsp, 0, (struct sockaddr *)&src, srclen);
+            sendto(sock, buf->tx, rsp, 0, (struct sockaddr *)&src, srclen);
     }
 
+done:
+    stop_telemetry_timer();
+
+    bool close_sock = sock >= 0;
     xSemaphoreTake(s_mutex, portMAX_DELAY);
+    if (socket_published && s_sock == sock) {
+        s_sock = -1;
+    } else if (socket_published) {
+        /* apply_live(false) already closed this descriptor to unblock us. */
+        close_sock = false;
+    }
     s_running = false;
+    s_starting = false;
+    bool restart = s_enabled && s_stopping;
+    s_stopping = false;
+    if (restart) s_starting = true;
     xSemaphoreGive(s_mutex);
-    close(s_sock); s_sock = -1;
+
+    if (close_sock && sock >= 0) close(sock);
+    if (buf) heap_caps_free(buf);
+    if (restart) start_snmp_task_reserved();
     vTaskDelete(NULL);
 }
 
@@ -1056,32 +1188,15 @@ void snmp_agent_init(void)
     snprintf(s_sysdescr, sizeof s_sysdescr, "ESP32 Tailscale Router %s",
              desc ? desc->version : "?");
 
-    /* Temperature sensor */
-    temperature_sensor_config_t tcfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(20, 100);
+    /* The S3's -10..80 C range is accurate to +/-1 C; 20..100 is only +/-2 C. */
+    temperature_sensor_config_t tcfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
     if (temperature_sensor_install(&tcfg, &s_temp_sensor) == ESP_OK)
         temperature_sensor_enable(s_temp_sensor);
     else
         s_temp_sensor = NULL;
 
-    /* Traffic hooks. Almost certainly a no-op this early — the netifs do
-     * not exist yet — but the telemetry tick retries every CPU_SAMPLE_S
-     * seconds until each one shows up. */
-    install_traffic_hooks();
-
-    /* Telemetry timer: CPU sampling + traffic-hook re-scan */
-    s_prev_wall_us = (uint64_t)esp_timer_get_time();
-    esp_timer_create_args_t targs = {
-        .callback = telemetry_tick_cb,
-        .name     = "snmp_tick",
-    };
-    if (esp_timer_create(&targs, &s_cpu_timer) == ESP_OK)
-        esp_timer_start_periodic(s_cpu_timer,
-                                 (uint64_t)CPU_SAMPLE_S * 1000000ULL);
-
     if (!s_enabled) { ESP_LOGI(TAG, "disabled"); return; }
-
-    xTaskCreate(snmp_task, "snmp_agent", TASK_STACK, NULL,
-                tskIDLE_PRIORITY + 2, NULL);
+    start_snmp_task_if_needed();
 }
 
 void snmp_agent_apply_live(bool enabled,
@@ -1090,7 +1205,7 @@ void snmp_agent_apply_live(bool enabled,
                            const char *sys_contact,
                            const char *sys_location)
 {
-    bool was_enabled = s_enabled;
+    int sock_to_close = -1;
 
     xSemaphoreTake(s_mutex, portMAX_DELAY);
     s_enabled = enabled;
@@ -1098,15 +1213,35 @@ void snmp_agent_apply_live(bool enabled,
     if (sys_name)     snprintf(s_sysname,     sizeof s_sysname,     "%s", sys_name);
     if (sys_contact)  snprintf(s_syscontact,  sizeof s_syscontact,  "%s", sys_contact);
     if (sys_location) snprintf(s_syslocation, sizeof s_syslocation, "%s", sys_location);
+    if (!enabled) {
+        s_stopping = s_running || s_starting;
+        sock_to_close = s_sock;
+        s_sock = -1;
+    }
     xSemaphoreGive(s_mutex);
 
-    if (enabled && !was_enabled && !s_running)
-        xTaskCreate(snmp_task, "snmp_agent", TASK_STACK, NULL,
-                    tskIDLE_PRIORITY + 2, NULL);
+    if (sock_to_close >= 0) {
+        shutdown(sock_to_close, SHUT_RDWR);
+        close(sock_to_close);
+    }
+    if (enabled) start_snmp_task_if_needed();
 }
 
-bool snmp_agent_is_enabled(void) { return s_enabled; }
-bool snmp_agent_is_running(void) { return s_running && s_enabled; }
+bool snmp_agent_is_enabled(void)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    bool enabled = s_enabled;
+    xSemaphoreGive(s_mutex);
+    return enabled;
+}
+
+bool snmp_agent_is_running(void)
+{
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    bool running = s_running && s_enabled;
+    xSemaphoreGive(s_mutex);
+    return running;
+}
 
 void snmp_agent_get_config(bool *enabled_out, bool *running_out,
                            char *community,    size_t comm_sz,

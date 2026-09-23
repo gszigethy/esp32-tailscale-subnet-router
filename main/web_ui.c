@@ -3572,6 +3572,14 @@ static esp_err_t snmp_post_handler(httpd_req_t *req)
 
     cJSON_Delete(root);
 
+    /* An empty community authenticates every SNMP datagram: its BER string
+     * has length zero, so the length and memcmp checks would both pass. */
+    if (community[0] == '\0') {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "SNMP community must not be empty");
+        return ESP_FAIL;
+    }
+
     /* Persist via error-tracking NVS wrappers (feeds send_save_response). */
     nvs_save_u8 (SNMP_NVS_KEY_EN,       (uint8_t)enabled);
     nvs_save_str(SNMP_NVS_KEY_COMM,     community);
