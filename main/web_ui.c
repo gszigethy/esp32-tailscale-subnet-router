@@ -40,6 +40,7 @@
 #include "ota.h"
 #include <stdlib.h>
 #include <time.h>
+#include <ctype.h>
 
 /* Cap on log payloads we surface over /api endpoints — both the live
  * log tail and the pre-crash snapshot share this ceiling so the JSON
@@ -3446,6 +3447,23 @@ static esp_err_t system_debug_radio_get_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, resp);
 }
+
+static bool parse_debug_bssid(const char *s, uint8_t mac[6])
+{
+    if (!s || strlen(s) != 17) return false;
+    for (int i = 0; i < 6; i++) {
+        size_t off = (size_t)i * 3;
+        unsigned char hi = (unsigned char)s[off];
+        unsigned char lo = (unsigned char)s[off + 1];
+        if (!isxdigit(hi) || !isxdigit(lo) || (i < 5 && s[off + 2] != ':'))
+            return false;
+        unsigned value;
+        if (sscanf(s + off, "%2x", &value) != 1) return false;
+        mac[i] = (uint8_t)value;
+    }
+    return true;
+}
+
 static esp_err_t system_debug_radio_post_handler(httpd_req_t *req)
 {
     if (require_auth(req) != ESP_OK) return ESP_FAIL;
@@ -3455,15 +3473,24 @@ static esp_err_t system_debug_radio_post_handler(httpd_req_t *req)
     if (!root) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON"); return ESP_FAIL; }
     const cJSON *b = cJSON_GetObjectItem(root, "bssid");
     bool reconnect = false; esp_err_t err = ESP_OK;
-    if (cJSON_IsString(b)) {
+    if (!cJSON_IsString(b) || !b->valuestring) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing BSSID");
+        return ESP_FAIL;
+    }
+    {
         wifi_config_t cfg;
         err = esp_wifi_get_config(WIFI_IF_STA, &cfg);
-        unsigned m[6];
-        if (err == ESP_OK && b->valuestring[0] && sscanf(b->valuestring, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) == 6) {
-            for (int i = 0; i < 6; i++) cfg.sta.bssid[i] = (uint8_t)m[i];
+        uint8_t mac[6];
+        if (err == ESP_OK && b->valuestring[0] && parse_debug_bssid(b->valuestring, mac)) {
+            memcpy(cfg.sta.bssid, mac, sizeof(mac));
             cfg.sta.bssid_set = 1; reconnect = true;
         } else if (err == ESP_OK && !b->valuestring[0]) {
             cfg.sta.bssid_set = 0; memset(cfg.sta.bssid, 0, 6); reconnect = true;
+        } else if (err == ESP_OK) {
+            cJSON_Delete(root);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid BSSID");
+            return ESP_FAIL;
         }
         if (reconnect) {
             err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
@@ -3530,10 +3557,16 @@ static esp_err_t snmp_post_handler(httpd_req_t *req)
     if (require_auth(req) != ESP_OK) return ESP_FAIL;
     nvs_save_errors_reset();
 
-    char buf[512];
-    if (recv_body(req, buf, sizeof buf, NULL) != ESP_OK) return ESP_FAIL;
+    /* Four 255-byte strings can exceed 1 KB as JSON, and escaping can make
+     * the wire representation larger still. Keep the request off the httpd
+     * stack and accept the entire form the UI permits. */
+    size_t buf_size = 8192;
+    char *buf = malloc_body_buf(buf_size);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    if (recv_body(req, buf, buf_size, NULL) != ESP_OK) { free(buf); return ESP_FAIL; }
 
     cJSON *root = cJSON_Parse(buf);
+    free(buf);
     if (!root) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON");
         return ESP_FAIL;
@@ -3554,41 +3587,36 @@ static esp_err_t snmp_post_handler(httpd_req_t *req)
     j = cJSON_GetObjectItem(root, "enabled");
     if (cJSON_IsBool(j)) enabled = cJSON_IsTrue(j);
 
-    j = cJSON_GetObjectItem(root, "community");
-    if (cJSON_IsString(j) && j->valuestring)
-        snprintf(community, sizeof community, "%s", j->valuestring);
-
-    j = cJSON_GetObjectItem(root, "sys_name");
-    if (cJSON_IsString(j) && j->valuestring)
-        snprintf(sys_name, sizeof sys_name, "%s", j->valuestring);
-
-    j = cJSON_GetObjectItem(root, "sys_contact");
-    if (cJSON_IsString(j) && j->valuestring)
-        snprintf(sys_contact, sizeof sys_contact, "%s", j->valuestring);
-
-    j = cJSON_GetObjectItem(root, "sys_location");
-    if (cJSON_IsString(j) && j->valuestring)
-        snprintf(sys_location, sizeof sys_location, "%s", j->valuestring);
+    const char *keys[] = { "community", "sys_name", "sys_contact", "sys_location" };
+    char *values[] = { community, sys_name, sys_contact, sys_location };
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        j = cJSON_GetObjectItem(root, keys[i]);
+        if (cJSON_IsString(j) && j->valuestring) {
+            if (strlen(j->valuestring) >= 256) {
+                cJSON_Delete(root);
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "SNMP field exceeds 255 bytes");
+                return ESP_FAIL;
+            }
+            strcpy(values[i], j->valuestring);
+        }
+    }
 
     cJSON_Delete(root);
 
-    /* An empty community authenticates every SNMP datagram: its BER string
-     * has length zero, so the length and memcmp checks would both pass. */
-    if (community[0] == '\0') {
+    /* An enabled agent with an empty community accepts any request carrying
+     * a zero-length community. A disabled agent may retain an empty value. */
+    if (enabled && community[0] == '\0') {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                             "SNMP community must not be empty");
         return ESP_FAIL;
     }
 
-    /* Persist via error-tracking NVS wrappers (feeds send_save_response). */
-    nvs_save_u8 (SNMP_NVS_KEY_EN,       (uint8_t)enabled);
-    nvs_save_str(SNMP_NVS_KEY_COMM,     community);
-    nvs_save_str(SNMP_NVS_KEY_NAME,     sys_name);
-    nvs_save_str(SNMP_NVS_KEY_CONTACT,  sys_contact);
-    nvs_save_str(SNMP_NVS_KEY_LOCATION, sys_location);
-
-    /* Apply live — agent restarts / reconfigures in-place. */
-    snmp_agent_apply_live(enabled, community, sys_name, sys_contact, sys_location);
+    /* A single NVS blob holds the complete configuration, including enable.
+     * No live change occurs when its write fails. */
+    esp_err_t err = snmp_agent_save_config(enabled, community, sys_name,
+                                           sys_contact, sys_location);
+    if (err != ESP_OK) nvs_save_record_err(SNMP_NVS_KEY_CONFIG, err);
 
     return send_save_response(req);
 }

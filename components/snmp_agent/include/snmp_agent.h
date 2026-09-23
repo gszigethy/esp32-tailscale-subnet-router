@@ -1,21 +1,22 @@
-/* SNMP agent component — lwIP built-in SNMPv1/v2c, read-only.
+/* SNMP agent component — read-only SNMPv1/v2c over a BSD UDP socket.
  * Binds to 0.0.0.0:161 so it is reachable on all interfaces including
- * the Tailscale netif. MIB-II (interfaces, IP, UDP) plus a private
- * enterprise subtree with free-heap gauges.
+ * the Tailscale netif. Serves standard system, interfaces, host-resources,
+ * and entity-sensor MIB objects plus one private heap-watermark OID.
  *
  * SPDX-License-Identifier: MIT
  */
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>
+#include "esp_err.h"
 
-/* NVS key names shared between snmp_agent.c (init) and web_ui.c (POST
- * handler, which does NVS writes via the error-tracking wrappers). */
+/* Legacy NVS keys are read at boot for migration. New saves use one blob. */
 #define SNMP_NVS_KEY_EN       "snmp_en"
 #define SNMP_NVS_KEY_COMM     "snmp_comm"
 #define SNMP_NVS_KEY_NAME     "snmp_name"
 #define SNMP_NVS_KEY_CONTACT  "snmp_contact"
 #define SNMP_NVS_KEY_LOCATION "snmp_location"
+#define SNMP_NVS_KEY_CONFIG   "snmp_cfg"
 
 /* Initialise from NVS and start the agent if enabled.
  * Call once from app_main, after nvs_flash_init and before web_ui_init. */
@@ -28,6 +29,14 @@ void snmp_agent_apply_live(bool enabled,
                            const char *sys_name,
                            const char *sys_contact,
                            const char *sys_location);
+
+/* Persist one complete configuration and apply it only after NVS succeeds.
+ * Existing installations with the legacy individual keys are still read. */
+esp_err_t snmp_agent_save_config(bool enabled,
+                                 const char *community,
+                                 const char *sys_name,
+                                 const char *sys_contact,
+                                 const char *sys_location);
 
 /* State queries — safe to call from any task. */
 bool snmp_agent_is_enabled(void);

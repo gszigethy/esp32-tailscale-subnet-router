@@ -860,12 +860,6 @@ void app_main(void)
     dns_relay_init();
     dns_relay_set_state_cb(dns_relay_state_cb);
 
-    /* SNMP agent — SNMPv1/v2c, read-only, binds 0.0.0.0:161.
-     * Loads enable flag + community + sys strings from NVS; starts the
-     * lwIP agent immediately if enabled.  Web UI manages runtime changes
-     * via snmp_agent_apply_live(). */
-    snmp_agent_init();
-
     /* If a core dump was saved on the previous boot, extract a one-line
      * summary (task name + PC + first backtrace frames) and persist it
      * to NVS so the telemetry "CRASH" column has something to send.
@@ -1103,6 +1097,12 @@ void app_main(void)
      * drop denied traffic. Must run AFTER esp_wifi_start so the netifs
      * exist and have their default input/linkoutput function pointers. */
     netif_hooks_init();
+
+    /* Install the router's ACL hooks before SNMP wraps the same netif
+     * pointers. Reversing that order can make the two wrappers call each
+     * other after SNMP's next scan. SNMP still starts before the web UI so
+     * its temperature-sensor owner is ready for status requests. */
+    snmp_agent_init();
 
     /* STA TTL hop-limit override — 0 = passthrough, else every outgoing
      * IPv4 frame's TTL is rewritten to this value. Operator config from
