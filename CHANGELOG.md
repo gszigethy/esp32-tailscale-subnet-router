@@ -6,6 +6,18 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.27-W5500.1] — 2026-09-23
+
+W5500 fork hotfix prepared for OTA testing. Built for the ESP32-S3 N16R8
+target; on-device OTA and traffic checks are pending operator testing.
+
+### Fixed
+- The SNMP agent releases its task, socket, timer, and PSRAM work buffers when disabled. Its retained configuration strings now live in PSRAM, and its CPU task snapshot is allocated only while sampling.
+- The `ts0` status and traffic hook scans stay on the TCP/IP thread. Tunnel lookup matches the WireGuard `wg` netif, so a CGNAT-addressed uplink cannot be hooked as both the uplink and tunnel. SNMP packet hooks are restored on disable, and the router's ACL hooks install first.
+- An empty community stored by an older version cannot start the SNMP listener. Settings now save as one NVS blob, with migration from the old keys; a failed save leaves the live agent unchanged.
+- The SNMP form accepts all four 255-byte fields, validates UTF-8 byte lengths, and can encode the longest accepted system string in a varbind.
+- The radio debug endpoint rejects malformed BSSIDs instead of silently truncating octets or reporting success without a reconnect.
+
 ## [0.1.27-W5500] — 2026-09-23
 
 Merges upstream v0.1.27 into the W5500 fork. The WiFi softAP now follows a
