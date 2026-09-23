@@ -13,6 +13,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `CONFIG_LWIP_MAX_SOCKETS` 24 → 26 (+1 for the SNMP UDP socket, +1 headroom). Existing build trees keep their generated `sdkconfig.esp32-s3`; copy this setting there or run a clean reconfigure after updating.
 - The web UI's CPU-temperature sampler reads through `snmp_agent_chip_temp_c()` instead of installing its own sensor handle. The chip has one thermal sensor and `temperature_sensor_install()` refuses a second owner, so with the agent claiming it at boot a second lazy-install would have failed and returned −999 forever.
 
+## [0.1.27] — 2026-09-16
+
+The router stops rebooting on uplink channel changes, and a tidy-up inside microlink. Device-tested before tagging: manual OTA, a forced roam of the uplink from channel 11 to channel 1 and back with the AP client watched from its own side (no reboot, client stayed associated, tunnel back within half a minute, heap flat across six roams), six peers direct, an AP client through the router.
+
+### Fixed
+- **The router no longer reboots when its uplink changes channel.** The old "ch-realign" logic rebooted on any mismatch between the softAP's configured channel and the channel the STA had just connected on, on the assumption that a single radio would otherwise time-share and collapse throughput. Measured on the reference router with a forced roam from a channel-11 to a channel-1 uplink: the WiFi driver moves the softAP to the STA's channel by itself, the AP client stayed associated with its address, the only gap was ~5 s of uplink DHCP, and throughput was unchanged. Behind an uplink that hops channels (band steering, auto-channel) the reboot fired on every hop — 27 times in six days on one device in the telemetry — dropping every AP client and the tunnel for 30–40 s each time, for nothing. Now: the learned channel is still saved so the next boot starts aligned, a warning is logged, and `/api/status` reports the channel the radio is actually on (`ap.channel`; the boot value is `ap.cfg_channel`). Re-applying the AP config live was measured too and is not an option: the netif restart clears NAPT and the ACL hooks, so AP clients lose the internet until a reboot.
+
+### Changed
+- **One Hostinfo builder** (microlink, internal). The four messages that carry a Hostinfo — RegisterRequest, the initial MapRequest, the long-poll MapRequest, the endpoint update — built it from four hand-copied blocks, which is how `IPNVersion` ended up in only two of them (fixed by hand in 0.5.10 / 0.1.23). They now share one `build_hostinfo()` and cannot drift. No change on the wire for the three map-family messages; the RegisterRequest's Hostinfo only has its keys in the same order as the others and carries the NAT flag when STUN already ran. Verified: admin API hostname / OS / routes unchanged, client version round trip and endpoint updates on both reference devices.
+
 ## [0.1.26] — 2026-09-10
 
 One fix: the residual per-reconnect PSRAM leak left after 0.1.25. Device-tested before tagging: manual OTA, five bursts of three connect requests and three single reconnects with no reset and a flat heap, six peers direct, an AP client through the router, the exit node via a relay and back.

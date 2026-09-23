@@ -244,10 +244,11 @@ static esp_err_t do_send(const char *event_type)
         read_crash_sig(crash_sig, sizeof(crash_sig));
     }
 
-    /* Reboot cause beyond the coarse rr code (e.g. "ch-realign 11->1"),
-     * set in main.c at boot from NVS reboot_why; "" for untagged resets.
-     * Sent as "rw" so the dashboard can distinguish a deliberate channel
-     * realign from a generic SW reset. */
+    /* Reboot cause beyond the coarse rr code, set in main.c at boot from
+     * NVS reboot_why; "" for untagged resets. Sent as "rw" so the dashboard
+     * can tell a deliberate firmware-initiated restart from a generic SW
+     * reset. No current code path tags one (the channel-realign reboot that
+     * used to is gone since 0.1.27); the field stays for the dashboard. */
     extern char g_reboot_why[];
 
     /* Reconnect-cause counters (since boot) from microlink — zeros when
