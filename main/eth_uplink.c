@@ -24,6 +24,9 @@
 #include "esp_eth.h"
 #include "esp_eth_netif_glue.h"
 #include "driver/spi_master.h"
+#include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "esp_netif.h"
 #include "esp_mac.h"
 #include "nvs_params.h"
@@ -98,6 +101,131 @@ static void on_eth_lost_ip(void *arg, esp_event_base_t base,
     s_ip = s_netmask = s_gw = 0;
 }
 
+/* ---- W5500 SPI transport without per-transfer allocations ---------------
+ *
+ * The stock W5500 SPI functions hand the caller's buffer straight to
+ * spi_device_polling_transmit(). With DMA enabled, the SPI master needs RX
+ * buffers whose address AND length are 4-byte aligned (and TX buffers in
+ * DMA-capable RAM), so it heap-allocates a bounce buffer for almost every
+ * transfer: every received frame (1466 bytes is not a multiple of 4), every
+ * 1-3 byte register read, and every frame sent from a PSRAM pbuf.
+ *
+ * When that allocation fails, ESP-IDF 5.5's setup_priv_desc() error path
+ * calls uninstall_priv_desc(), which copies "back" from the never-allocated
+ * buffer: memcpy(rx_buffer, NULL, len) -> LoadProhibited, EXCVADDR 0, in
+ * w5500_tsk. Internal RAM is tightest during an OTA download (TLS and the
+ * HTTP client hold their buffers there while frames keep arriving), so an
+ * update over the wired uplink was what tripped it.
+ *
+ * This transport owns two DMA-capable, word-aligned internal buffers,
+ * allocated once at init, so the SPI master never needs to allocate:
+ *   - RX: the transfer is padded to a multiple of 4 bytes and the requested
+ *     bytes copied out. W5500 reads have no side effects (interrupt flags
+ *     clear on write), so reading up to 3 bytes past the request is benign.
+ *   - TX: data is copied in at its exact length (TX needs DMA-capable RAM,
+ *     not alignment), so nothing extra is ever written to the chip.
+ * Transfers longer than a buffer are split; the W5500 address phase (the
+ * 16-bit `cmd` field) is advanced by the bytes already moved.
+ */
+#define W5500_XFER_BUF_SIZE 1536   /* > one Ethernet frame, multiple of 4 */
+
+typedef struct {
+    spi_host_device_t host;
+    spi_device_interface_config_t devcfg;
+} w5500_xfer_config_t;
+
+typedef struct {
+    spi_device_handle_t hdl;
+    SemaphoreHandle_t   lock;
+    uint8_t            *rx;    /* W5500_XFER_BUF_SIZE, DMA-capable, 4-aligned */
+    uint8_t            *tx;    /* W5500_XFER_BUF_SIZE, DMA-capable */
+} w5500_xfer_t;
+
+static esp_err_t w5500_xfer_deinit(void *ctx)
+{
+    w5500_xfer_t *x = (w5500_xfer_t *)ctx;
+    if (!x) return ESP_OK;
+    if (x->hdl)  spi_bus_remove_device(x->hdl);
+    if (x->lock) vSemaphoreDelete(x->lock);
+    heap_caps_free(x->rx);
+    heap_caps_free(x->tx);
+    free(x);
+    return ESP_OK;
+}
+
+static void *w5500_xfer_init(const void *config)
+{
+    const w5500_xfer_config_t *cfg = (const w5500_xfer_config_t *)config;
+    w5500_xfer_t *x = calloc(1, sizeof *x);
+    if (!x) return NULL;
+    x->rx   = heap_caps_aligned_alloc(4, W5500_XFER_BUF_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    x->tx   = heap_caps_aligned_alloc(4, W5500_XFER_BUF_SIZE, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+    x->lock = xSemaphoreCreateMutex();
+    if (!x->rx || !x->tx || !x->lock ||
+        spi_bus_add_device(cfg->host, &cfg->devcfg, &x->hdl) != ESP_OK) {
+        ESP_LOGE(TAG, "W5500 SPI transport init failed");
+        w5500_xfer_deinit(x);
+        return NULL;
+    }
+    return x;
+}
+
+static esp_err_t w5500_xfer_read(void *ctx, uint32_t cmd, uint32_t addr,
+                                 void *data, uint32_t len)
+{
+    w5500_xfer_t *x = (w5500_xfer_t *)ctx;
+    if (xSemaphoreTake(x->lock, pdMS_TO_TICKS(50)) != pdTRUE) return ESP_ERR_TIMEOUT;
+    esp_err_t ret = ESP_OK;
+    for (uint32_t done = 0; done < len; ) {
+        uint32_t n = len - done;
+        if (n > W5500_XFER_BUF_SIZE) n = W5500_XFER_BUF_SIZE;
+        uint32_t padded = (n + 3) & ~3u;
+        spi_transaction_t t = {
+            .cmd       = (uint16_t)(cmd + done),
+            .addr      = addr,
+            .length    = 8 * padded,
+            .rxlength  = 8 * padded,
+            .rx_buffer = x->rx,
+        };
+        if (spi_device_polling_transmit(x->hdl, &t) != ESP_OK) {
+            ESP_LOGE(TAG, "W5500 SPI read failed");
+            ret = ESP_FAIL;
+            break;
+        }
+        memcpy((uint8_t *)data + done, x->rx, n);
+        done += n;
+    }
+    xSemaphoreGive(x->lock);
+    return ret;
+}
+
+static esp_err_t w5500_xfer_write(void *ctx, uint32_t cmd, uint32_t addr,
+                                  const void *data, uint32_t len)
+{
+    w5500_xfer_t *x = (w5500_xfer_t *)ctx;
+    if (xSemaphoreTake(x->lock, pdMS_TO_TICKS(50)) != pdTRUE) return ESP_ERR_TIMEOUT;
+    esp_err_t ret = ESP_OK;
+    for (uint32_t done = 0; done < len; ) {
+        uint32_t n = len - done;
+        if (n > W5500_XFER_BUF_SIZE) n = W5500_XFER_BUF_SIZE;
+        memcpy(x->tx, (const uint8_t *)data + done, n);
+        spi_transaction_t t = {
+            .cmd       = (uint16_t)(cmd + done),
+            .addr      = addr,
+            .length    = 8 * n,
+            .tx_buffer = x->tx,
+        };
+        if (spi_device_polling_transmit(x->hdl, &t) != ESP_OK) {
+            ESP_LOGE(TAG, "W5500 SPI write failed");
+            ret = ESP_FAIL;
+            break;
+        }
+        done += n;
+    }
+    xSemaphoreGive(x->lock);
+    return ret;
+}
+
 esp_netif_t *eth_uplink_init(void)
 {
     /* Read the master switch before touching any hardware, so the decision
@@ -146,6 +274,16 @@ esp_netif_t *eth_uplink_init(void)
     if (CONFIG_ETH_W5500_INT_GPIO < 0) {
         w5500cfg.poll_period_ms = 10;
     }
+    /* Allocation-free SPI transport (see w5500_xfer_* above) in place of the
+     * stock one. The config is only read during esp_eth_mac_new_w5500(). */
+    static w5500_xfer_config_t xfer_cfg;
+    xfer_cfg.host   = (spi_host_device_t)CONFIG_ETH_W5500_SPI_HOST;
+    xfer_cfg.devcfg = devcfg;
+    w5500cfg.custom_spi_driver.config = &xfer_cfg;
+    w5500cfg.custom_spi_driver.init   = w5500_xfer_init;
+    w5500cfg.custom_spi_driver.deinit = w5500_xfer_deinit;
+    w5500cfg.custom_spi_driver.read   = w5500_xfer_read;
+    w5500cfg.custom_spi_driver.write  = w5500_xfer_write;
 
     /* MAC + PHY (both integrated in the W5500) ------------------------------ */
     eth_mac_config_t mac_cfg = ETH_MAC_DEFAULT_CONFIG();
