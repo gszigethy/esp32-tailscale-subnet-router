@@ -80,7 +80,6 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          pio run -e esp32-s3 -t size >> "$SIZE_DIR/head-size.txt"
           stat -c '%s' .pio/build/esp32-s3/firmware.bin > "$SIZE_DIR/head-bytes.txt"
           if [ -n "$BASE_SHA" ]; then
             git worktree add --detach "$SIZE_DIR/base" "$BASE_SHA"
