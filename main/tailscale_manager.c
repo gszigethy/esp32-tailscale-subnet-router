@@ -130,6 +130,19 @@ void tailscale_init(void)
     tailscale_advertise_routes = nvs_str_or_empty("ts_routes");
     if (nvs_param_get_int("ts_adv_ap", &v) == ESP_OK) {
         tailscale_advertise_ap = v ? 1 : 0;
+    } else {
+        /* Migration. This fork used to advertise the AP subnet from a
+         * Status-page toggle (ap_route_en, default off); upstream 0.1.24
+         * replaced it with ts_adv_ap, default on, and 0.1.25-W5500 merged the
+         * two. Without this, an operator who had deliberately turned the AP
+         * route off would silently start advertising it after the update.
+         * Carry the old value over once, then the new key owns it. */
+        uint8_t legacy = 0;
+        if (nvs_param_get_u8("ap_route_en", &legacy) == ESP_OK) {
+            tailscale_advertise_ap = legacy ? 1 : 0;
+            nvs_param_set_int("ts_adv_ap", tailscale_advertise_ap);
+            ESP_LOGI(TAG, "migrated ap_route_en=%u to ts_adv_ap", (unsigned)legacy);
+        }
     }
     if (nvs_param_get_int("ts_maxpeers", &v) == ESP_OK && v >= 1 && v <= 64) {
         tailscale_max_peers = v;
@@ -305,7 +318,7 @@ static esp_err_t tailscale_connect_locked(void)
         .ctrl_watchdog_ms = 0,
         .ctrl_host = (tailscale_login_server && tailscale_login_server[0]) ? tailscale_login_server : NULL,
         .ipn_version = ipn_version_effective(),
-        .advertise_routes = tailscale_advertise_routes_effective(),
+        .advertise_routes = tailscale_compose_routes(),   /* W5500 fork: + ETH/STA auto-routes */
         .netcheck_override_enabled = (tailscale_netcheck_override != 0),
         .netcheck_override_threshold_ms = (uint32_t)tailscale_netcheck_threshold_ms,
         .preferred_derp_region = (uint16_t)tailscale_default_derp_region,
@@ -434,4 +447,56 @@ void tailscale_connect_task(void *pvParameters)
     (void)tailscale_connect_locked();
     life_unlock();
     vTaskDelete(NULL);
+}
+
+/* ---- W5500 fork: per-interface auto-routes -------------------------------
+ *
+ * Kept as a layer on top of tailscale_advertise_routes_effective() rather than
+ * a rewrite of it, so upstream changes to the AP/manual composition flow
+ * through untouched. The per-interface CIDRs are cached in NVS by main.c's
+ * got-IP handlers (eth_route_cidr / sta_route_cidr); the enable flags are the
+ * live globals main.c loads at boot -- not a fresh NVS read, whose "key
+ * absent" default would disagree with main.c's (ETH defaults on). */
+extern volatile uint8_t eth_route_en;
+extern volatile uint8_t sta_route_en;
+
+/* Append `cidr` as a new line unless it is empty, already listed, or does not
+ * fit. `buf` is a newline-separated list, NUL-terminated. */
+static void routes_append_unique(char *buf, size_t buf_size, const char *cidr)
+{
+    if (!cidr || !cidr[0]) return;
+    size_t clen = strlen(cidr);
+    for (const char *p = buf; *p; ) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        if (len == clen && strncmp(p, cidr, clen) == 0) return;
+        if (!eol) break;
+        p = eol + 1;
+    }
+    size_t used = strlen(buf);
+    size_t need = clen + (used ? 1 : 0);
+    if (used + need >= buf_size) return;
+    if (used) buf[used++] = '\n';
+    memcpy(buf + used, cidr, clen + 1);
+}
+
+static void routes_append_cached(char *buf, size_t buf_size, const char *nvs_key)
+{
+    char *cidr = nvs_param_get_str(nvs_key);
+    routes_append_unique(buf, buf_size, cidr);
+    free(cidr);
+}
+
+const char *tailscale_compose_routes(void)
+{
+    /* Same size as the upstream helper's buffer; microlink copies at most
+     * 256 bytes of it at init. Not reentrant, exactly like that helper: the
+     * connect path is serialized by s_life_mux, but a web UI preview landing
+     * in the same instant shares the buffer for that one call. */
+    static char buf[640];
+    const char *base = tailscale_advertise_routes_effective();
+    strlcpy(buf, base ? base : "", sizeof buf);
+    if (eth_route_en) routes_append_cached(buf, sizeof buf, "eth_route_cidr");
+    if (sta_route_en) routes_append_cached(buf, sizeof buf, "sta_route_cidr");
+    return buf[0] ? buf : NULL;
 }
