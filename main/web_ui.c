@@ -4776,6 +4776,30 @@ static const httpd_uri_t uri_sdlog_erase = {
  * auto-detected value is kept.  Restarts Tailscale so tailscale_compose_routes()
  * picks up the new flag at the next connect.  ts_routes (manual) is never
  * modified here. */
+/* Strictly parse an IPv4 CIDR "a.b.c.d/p" (p = 1..32, nothing trailing) and
+ * write its normalised network form (host bits cleared) to `out`. The
+ * override ends up in the newline-separated route list handed to microlink,
+ * so anything looser -- a newline smuggling in extra routes such as
+ * 0.0.0.0/0, or garbage that breaks control-plane registration -- must be
+ * rejected here. /0 is refused: a default route is what exit-node mode is
+ * for, not a LAN auto-route. */
+static bool cidr_normalize(const char *in, char *out, size_t out_size)
+{
+    unsigned a, b, c, d, pfx;
+    char tail;
+    if (!in || sscanf(in, "%3u.%3u.%3u.%3u/%2u%c", &a, &b, &c, &d, &pfx, &tail) != 5) {
+        return false;
+    }
+    if (a > 255 || b > 255 || c > 255 || d > 255 || pfx < 1 || pfx > 32) return false;
+    uint32_t ip   = (a << 24) | (b << 16) | (c << 8) | d;
+    uint32_t mask = 0xFFFFFFFFu << (32 - pfx);
+    ip &= mask;
+    snprintf(out, out_size, "%u.%u.%u.%u/%u",
+             (unsigned)(ip >> 24), (unsigned)(ip >> 16) & 0xFF,
+             (unsigned)(ip >> 8) & 0xFF, (unsigned)ip & 0xFF, pfx);
+    return true;
+}
+
 static esp_err_t eth_routing_handler(httpd_req_t *req)
 {
     if (require_auth(req) != ESP_OK) return ESP_FAIL;
@@ -4794,15 +4818,25 @@ static esp_err_t eth_routing_handler(httpd_req_t *req)
     const cJSON *j_enabled = cJSON_GetObjectItem(root, "enabled");
     const cJSON *j_cidr    = cJSON_GetObjectItem(root, "cidr");
 
+    /* Validate the optional override before changing any state, so a bad
+     * request leaves the current configuration exactly as it was. */
+    char cidr_norm[20] = "";
+    if (cJSON_IsString(j_cidr) && j_cidr->valuestring[0] &&
+        !cidr_normalize(j_cidr->valuestring, cidr_norm, sizeof cidr_norm)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "cidr must be a.b.c.d/1-32");
+        return ESP_FAIL;
+    }
+
     if (cJSON_IsBool(j_enabled)) {
         uint8_t en = cJSON_IsTrue(j_enabled) ? 1 : 0;
         eth_route_en = en;
         nvs_param_set_u8("eth_route_en", en);
 
         /* Optional CIDR override — persists a custom CIDR in NVS. */
-        if (en && cJSON_IsString(j_cidr) && j_cidr->valuestring[0]) {
-            nvs_param_set_str("eth_route_cidr", j_cidr->valuestring);
-            ESP_LOGI(TAG, "eth-routing ON — CIDR override %s", j_cidr->valuestring);
+        if (en && cidr_norm[0]) {
+            nvs_param_set_str("eth_route_cidr", cidr_norm);
+            ESP_LOGI(TAG, "eth-routing ON — CIDR override %s", cidr_norm);
         } else {
             ESP_LOGI(TAG, "eth-routing %s", en ? "ON" : "OFF");
         }

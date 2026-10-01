@@ -54,6 +54,7 @@
 #include "dhcp_reservations.h"
 #include "portmap.h"
 #include "eth_uplink.h"
+#include "esp_eth.h"          /* ETH_EVENT for the link-down failover handler */
 #include "mac_deny.h"
 #include "reset_history.h"
 #include "ota.h"
@@ -131,11 +132,37 @@ volatile int connect_count = 0;
  * leased (and vice versa), reporting a healthy router as degraded.
  * sta_connect is read by web_ui.c so the WiFi card reflects WiFi only. */
 volatile int sta_connect = 0;
-static volatile int s_eth_connect = 0;
+/* Non-static: tailscale_compose_routes() advertises the ETH LAN only while
+ * the wired uplink actually holds a lease. */
+volatile int eth_connect = 0;
 
 static void uplink_state_changed(void)
 {
-    ap_connect = (sta_connect || s_eth_connect) ? 1 : 0;
+    ap_connect = (sta_connect || eth_connect) ? 1 : 0;
+}
+
+/* Ask for a Tailscale (re)connect. Called whenever the path the tunnel runs
+ * over, or the set of advertised routes, changes. tailscale_connect_task
+ * coalesces requests (one in flight plus one queued), so a burst of uplink
+ * events costs at most one extra reconnect. */
+static void tailscale_kick(void)
+{
+    if (tailscale_enabled) {
+        xTaskCreate(tailscale_connect_task, "ts_connect", 4096, NULL, 5, NULL);
+    }
+}
+
+/* Hand the default route to the WiFi STA, if it holds a lease. ETH claims
+ * the default with esp_netif_set_default_netif(), which is a *manual*
+ * override: esp_netif will not re-select automatically while that netif
+ * still exists, even with its cable out. So every way ETH can go away
+ * (lost IP, link down, switched off) must move the default explicitly, or
+ * outbound traffic stays on a dead link while WiFi has a working lease. */
+static void default_route_to_sta(void)
+{
+    if (!sta_connect) return;
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (sta) esp_netif_set_default_netif(sta);
 }
 
 /* Per-interface subnet routing flags.
@@ -391,8 +418,13 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             ESP_LOGI(TAG_STA, "Station started — uplink disabled, not associating");
         }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        bool sta_was_up = sta_connect;
         sta_connect = 0;
         uplink_state_changed();
+        /* With ETH carrying the tunnel, a lost STA only matters if its subnet
+         * was advertised: reconnect so the stale route is withdrawn. (Fires
+         * on every retry, hence only on the up -> down transition.) */
+        if (sta_was_up && eth_connect && sta_route_en) tailscale_kick();
         /* Uplink switched off (or never on): stop here. Without this the
          * handler's own esp_wifi_connect() below turns a single disconnect
          * into an endless retry loop that keeps the radio scanning. */
@@ -417,8 +449,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG_STA, "Got IP:" IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
         s_net_retries = 0;   /* successful association — clear the rotation counter */
+        bool sta_was_up = sta_connect;
         sta_connect = 1;
         uplink_state_changed();
+        /* Without a wired lease the STA is the uplink: take the default route
+         * back from a manual ETH override that may still be in place. */
+        if (!eth_connect) default_route_to_sta();
 
         /* Single radio: the softAP always sits on the STA's channel -- the
          * WiFi driver moves it there itself whenever the STA (re)connects,
@@ -472,12 +508,14 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             free(old_cidr);
         }
 
-        /* Auto-spawn the Tailscale connect task once STA has an IP.
-         * Guard against double-spawn: if Ethernet already brought up the
-         * tunnel, leave it running rather than tearing it down on a STA
-         * DHCP renewal or roam event. */
-        if (tailscale_enabled && !tailscale_connected) {
-            xTaskCreate(tailscale_connect_task, "ts_connect", 4096, NULL, 5, NULL);
+        /* (Re)connect Tailscale once STA has an IP. When the STA is the
+         * uplink this runs on every got-IP, as upstream does: a drop, roam or
+         * address change leaves microlink on a dead path otherwise. When ETH
+         * carries the tunnel, leave it alone unless it isn't up yet, or the
+         * STA subnet is advertised and has just appeared or changed. */
+        if (!eth_connect || !tailscale_connected ||
+            (sta_route_en && (!sta_was_up || event->ip_changed))) {
+            tailscale_kick();
         }
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 
@@ -518,6 +556,21 @@ static void cidr_from_dhcp_event(const ip_event_got_ip_t *ev,
  *
  * No channel-realign logic here — that single-radio constraint is WiFi-only.
  */
+/* ETH is no longer usable (lost IP, link down or switched off). Once per
+ * up -> down transition: clear its state, move the default route to the STA
+ * if that has a lease, and reconnect Tailscale so the tunnel follows and the
+ * ETH LAN is withdrawn from the advertised routes. */
+static void eth_uplink_went_down(const char *why)
+{
+    if (!eth_connect) return;
+    ESP_LOGI("ETH", "uplink down (%s)", why);
+    eth_connect = 0;
+    uplink_state_changed();
+    default_route_to_sta();
+    tailscale_kick();
+    portmap_install_all();   /* re-bind forwards to the remaining uplink */
+}
+
 static void eth_ip_event_handler(void *arg, esp_event_base_t event_base,
                                   int32_t event_id, void *event_data)
 {
@@ -526,8 +579,13 @@ static void eth_ip_event_handler(void *arg, esp_event_base_t event_base,
     if (event_id == IP_EVENT_ETH_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI("ETH", "Got IP:" IPSTR, IP2STR(&event->ip_info.ip));
-        s_eth_connect = 1;
+        bool eth_was_up = eth_connect;
+        eth_connect = 1;
         uplink_state_changed();
+
+        /* This always follows the netif_add() of an ETH (re)start, which
+         * overwrites the firewall/TTL/counter hooks -- put them back. */
+        netif_hooks_ensure_eth();
 
         /* Promote ETH to the default route now that it has a valid DHCP
          * lease.  Doing this here (not at eth_uplink_init() time) guarantees
@@ -556,18 +614,16 @@ static void eth_ip_event_handler(void *arg, esp_event_base_t event_base,
             }
         }
 
-        /* Spawn or restart the Tailscale connect task.
-         * event->ip_changed is true on the first DHCP lease and on renewals
-         * that bring a different address; it is false on stable same-address
-         * renewals.  On ip_changed we restart unconditionally so the tunnel
-         * always sources from the wired interface even if a prior STA-based
-         * Tailscale session was already running.  tailscale_connect() handles
-         * teardown of any existing microlink instance internally. */
-        if (tailscale_enabled && event->ip_changed) {
+        /* Restart Tailscale when ETH has just come up (first lease, cable
+         * back, switched back on) or its address changed: the tunnel moves
+         * onto the wired path and the ETH LAN is advertised again. Stable
+         * same-address renewals leave a live session alone. ip_changed is
+         * false when the link returns with the same lease, hence eth_was_up. */
+        if (!eth_was_up || event->ip_changed) {
             tailscale_connected = false;
-            xTaskCreate(tailscale_connect_task, "ts_connect", 4096, NULL, 5, NULL);
-        } else if (tailscale_enabled && !tailscale_connected) {
-            xTaskCreate(tailscale_connect_task, "ts_connect", 4096, NULL, 5, NULL);
+            tailscale_kick();
+        } else if (!tailscale_connected) {
+            tailscale_kick();
         }
 
         /* Copy the upstream (Ethernet) DNS into the AP-side DHCP options. */
@@ -578,9 +634,20 @@ static void eth_ip_event_handler(void *arg, esp_event_base_t event_base,
         portmap_install_all();
 
     } else if (event_id == IP_EVENT_ETH_LOST_IP) {
-        ESP_LOGI("ETH", "Lost IP — uplink down");
-        s_eth_connect = 0;
-        uplink_state_changed();
+        eth_uplink_went_down("lost IP");
+    }
+}
+
+/* Link down and driver stop arrive long before IP_EVENT_ETH_LOST_IP (which
+ * waits out CONFIG_NETIF_IP_LOST_TIMER_INTERVAL), so fail over on those. */
+static void eth_link_event_handler(void *arg, esp_event_base_t event_base,
+                                   int32_t event_id, void *event_data)
+{
+    if (event_base != ETH_EVENT) return;
+    if (event_id == ETHERNET_EVENT_DISCONNECTED) {
+        eth_uplink_went_down("link down");
+    } else if (event_id == ETHERNET_EVENT_STOP) {
+        eth_uplink_went_down("stopped");
     }
 }
 
@@ -1083,6 +1150,14 @@ void app_main(void)
         ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
                         IP_EVENT_ETH_LOST_IP,
                         &eth_ip_event_handler,
+                        NULL, NULL));
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(ETH_EVENT,
+                        ETHERNET_EVENT_DISCONNECTED,
+                        &eth_link_event_handler,
+                        NULL, NULL));
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(ETH_EVENT,
+                        ETHERNET_EVENT_STOP,
+                        &eth_link_event_handler,
                         NULL, NULL));
     }
 #endif
