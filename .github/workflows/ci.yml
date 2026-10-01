@@ -68,15 +68,20 @@ jobs:
         shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-format-18
-          git diff --no-color --unified=0 "$BASE_SHA" HEAD -- 'main/*.c' 'main/*.h' 'components/**/*.c' 'components/**/*.h' > "$RUNNER_TEMP/source.diff"
+          git diff --no-color --unified=0 "$BASE_SHA" "$HEAD_SHA" -- 'main/*.c' 'main/*.h' 'components/**/*.c' 'components/**/*.h' > "$RUNNER_TEMP/source.diff"
           if [ ! -s "$RUNNER_TEMP/source.diff" ]; then
             echo "No changed C/C++ lines to format."
             exit 0
           fi
-          clang-format-diff-18 -p1 -style=file -binary clang-format-18 < "$RUNNER_TEMP/source.diff" > "$RUNNER_TEMP/format.patch"
+          if ! clang-format-diff-18 -p1 -style=file -binary clang-format-18 < "$RUNNER_TEMP/source.diff" > "$RUNNER_TEMP/format.patch"; then
+            cat "$RUNNER_TEMP/format.patch"
+            echo "::error::Changed-line formatting failed; see the patch or formatter error above."
+            exit 1
+          fi
           if [ -s "$RUNNER_TEMP/format.patch" ]; then
             cat "$RUNNER_TEMP/format.patch"
             exit 1
