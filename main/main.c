@@ -583,10 +583,6 @@ static void eth_ip_event_handler(void *arg, esp_event_base_t event_base,
         eth_connect = 1;
         uplink_state_changed();
 
-        /* This always follows the netif_add() of an ETH (re)start, which
-         * overwrites the firewall/TTL/counter hooks -- put them back. */
-        netif_hooks_ensure_eth();
-
         /* Promote ETH to the default route now that it has a valid DHCP
          * lease.  Doing this here (not at eth_uplink_init() time) guarantees
          * lwIP's routing table already has an ETH entry when the preference

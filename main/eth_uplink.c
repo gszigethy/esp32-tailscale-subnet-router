@@ -30,6 +30,8 @@
 #include "esp_netif.h"
 #include "esp_mac.h"
 #include "nvs_params.h"
+#include "netif_hooks.h"
+#include "lwip/esp_netif_net_stack.h"
 
 static const char *TAG = "eth_uplink";
 
@@ -351,6 +353,15 @@ esp_netif_t *eth_uplink_init(void)
 
     /* netif (DHCP client enabled by default) -------------------------------- */
     esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
+    /* Stock ETH netstack except for init_fn, which also installs the
+     * firewall/TTL/counter hooks on every netif_add() (see netif_hooks.c). */
+    static const esp_netif_netstack_config_t eth_netstack = {
+        .lwip = {
+            .init_fn  = netif_hooks_eth_netif_init,
+            .input_fn = ethernetif_input,
+        },
+    };
+    netif_cfg.stack = &eth_netstack;
     esp_netif_t *netif = esp_netif_new(&netif_cfg);
     if (!netif) {
         ESP_LOGE(TAG, "esp_netif_new failed");

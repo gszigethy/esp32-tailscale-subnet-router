@@ -15,15 +15,17 @@
 #pragma once
 
 #include <stdint.h>
+#include "lwip/err.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 void netif_hooks_init(void);
-/* W5500 fork: put the ETH hooks back if a netif restart overwrote them.
- * Idempotent; called on every IP_EVENT_ETH_GOT_IP. */
-void netif_hooks_ensure_eth(void);
+/* W5500 fork: lwIP init_fn for the ETH netif. Wraps ethernetif_init() and
+ * installs the ETH firewall/TTL/counter hooks inside every netif_add(). */
+struct netif;
+err_t netif_hooks_eth_netif_init(struct netif *netif);
 
 /* Wire-byte counters — accumulated in the four hook tap points before
  * the ACL check, so they represent everything that actually hit the
