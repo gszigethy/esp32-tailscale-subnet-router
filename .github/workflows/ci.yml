@@ -21,12 +21,13 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - name: Cache PlatformIO
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cache/pip
@@ -36,7 +37,7 @@ jobs:
             ${{ runner.os }}-platformio-
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.13"
 
@@ -47,10 +48,38 @@ jobs:
           python -m pip install --require-hashes --only-binary :all: -r .github/ci/requirements.txt
 
       - name: Check whitespace
-        run: git diff --check
+        run: git diff --check "${{ github.event.pull_request.base.sha || github.event.before || github.sha }}" HEAD
 
       - name: Build ESP32-S3 firmware
         run: pio run -e esp32-s3
 
       - name: Static analysis (Cppcheck)
         run: pio check -e esp32-s3 --skip-packages --fail-on-defect=high
+
+
+      - name: Check formatting on changed C/C++ lines
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+          git diff --no-color --unified=0 "$BASE_SHA" HEAD -- main/*.c main/*.h 'components/**/*.c' 'components/**/*.h' | clang-format-diff-18 -p1 -style=file > /tmp/format.patch
+          if [ -s /tmp/format.patch ]; then
+            cat /tmp/format.patch
+            exit 1
+          fi
+
+      - name: Firmware size comparison
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          pio run -e esp32-s3 -t size > /tmp/head-size.txt
+          stat -c '%s' .pio/build/esp32-s3/firmware.bin > /tmp/head-bytes.txt
+          if [ -n "$BASE_SHA" ]; then
+            git worktree add --detach /tmp/firmware-base "$BASE_SHA"
+            git -C /tmp/firmware-base submodule update --init --recursive
+            (cd /tmp/firmware-base && pio run -e esp32-s3) > /tmp/base-size.txt
+            stat -c '%s' /tmp/firmware-base/.pio/build/esp32-s3/firmware.bin > /tmp/base-bytes.txt
+          fi
+          python .github/ci/firmware_size.py
