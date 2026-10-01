@@ -58,6 +58,7 @@ jobs:
         run: |
           mkdir -p "$SIZE_DIR"
           pio run -e esp32-s3 | tee "$SIZE_DIR/head-size.txt"
+          stat -c '%s' .pio/build/esp32-s3/firmware.bin > "$SIZE_DIR/head-bytes.txt"
 
       - name: Static analysis (Cppcheck)
         run: pio check -e esp32-s3 --skip-packages --fail-on-defect=high
@@ -80,7 +81,6 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          stat -c '%s' .pio/build/esp32-s3/firmware.bin > "$SIZE_DIR/head-bytes.txt"
           if [ -n "$BASE_SHA" ]; then
             git worktree add --detach "$SIZE_DIR/base" "$BASE_SHA"
             git -C "$SIZE_DIR/base" submodule update --init --recursive
