@@ -1,24 +1,25 @@
-# CI quality baseline
+# ESP32 firmware CI checks
 
-Checks run on pushes and pull requests with read-only repository permissions.
-GitHub Actions are pinned to immutable commits; Dependabot updates those pins.
+The quality workflow runs on main pushes, pull requests and manual runs with
+read-only repository permissions. GitHub Actions use immutable commit pins;
+Dependabot maintains the Actions updates.
 
-Python and extension JavaScript checks compare finding counts by file, rule and
-message against the PR base, ignoring line shifts. Existing findings remain
-visible; new findings fail CI. Pushes compare against the previous commit.
-Manual runs or new branches without a valid previous commit report the current
-baseline. Syntax, builds, tests and project validators remain strict.
+PlatformIO builds the ESP32-S3 firmware and Cppcheck fails on high-severity
+defects in first-party code. PlatformIO Core and its Python dependencies are
+installed from the existing hash-locked, wheel-only requirements file.
+CodeQL analyzes C/C++ and Python, and the sensitive-data workflow scans changes.
 
-Type checks, Perl::Critic and Prettier begin as nonblocking diagnostic steps.
-Their failures appear in Actions logs; they are not claimed as passing gates.
-Tighten them after reviewing and fixing the legacy baseline. Luxeva has no
-runtime test suite yet; syntax/HACS/hassfest do not replace behavioral tests.
-The irrigation coverage report is informational, without a fabricated target.
+Pull requests check whitespace against their base and apply clang-format 18
+only to changed first-party C/C++ lines under main and components. The checked-in
+.clang-format sets LLVM style, four-space indentation and a 120-column limit.
+Legacy formatting outside changed lines is not a new failure.
 
-ESP32 clang-format checks only changed lines in first-party C/C++ on PRs.
-Firmware size builds both PR and base, reports binary growth and flash/RAM
-usage, and leaves capacity enforcement to the real firmware build.
+The size report captures firmware.bin immediately after each build, then builds
+the PR base with the same runner and toolchain. It reports binary size growth
+and flash/RAM usage in the job summary. Push and manual runs report the current
+firmware size without a PR comparison. Temporary reports use the runner's
+private temporary directory. No arbitrary size-growth threshold is imposed;
+capacity errors remain enforced by the firmware build.
 
-Choose required checks in branch rules only after the first CI results are
-reviewed. These changes do not configure external Sonar accounts or branch
-rules, and do not merge themselves.
+These changes affect development checks and reports only. Firmware sources,
+runtime configuration and version numbers are unchanged; no release is needed.

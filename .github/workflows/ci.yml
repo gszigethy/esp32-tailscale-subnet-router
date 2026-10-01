@@ -63,9 +63,9 @@ jobs:
       - name: Static analysis (Cppcheck)
         run: pio check -e esp32-s3 --skip-packages --fail-on-defect=high
 
-
       - name: Check formatting on changed C/C++ lines
         if: github.event_name == 'pull_request'
+        shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
