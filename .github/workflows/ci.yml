@@ -1,0 +1,56 @@
+name: PlatformIO Quality Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Build & static analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: ${{ runner.os }}-platformio-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-platformio-
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install PlatformIO Core
+        # Hash-locked and wheels only: no unpinned dependency and no package
+        # setup script runs on the runner (see .github/ci/requirements.txt).
+        run: |
+          python -m pip install --require-hashes --only-binary :all: -r .github/ci/requirements.txt
+
+      - name: Check whitespace
+        run: git diff --check
+
+      - name: Build ESP32-S3 firmware
+        run: pio run -e esp32-s3
+
+      - name: Static analysis (Cppcheck)
+        run: pio check -e esp32-s3 --skip-packages --fail-on-defect=high
