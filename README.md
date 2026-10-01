@@ -1,3 +1,5 @@
+> **W5500 Ethernet fork.** This is upstream [Csontikka/esp32-tailscale-subnet-router](https://github.com/Csontikka/esp32-tailscale-subnet-router) plus a wired uplink through a W5500 SPI Ethernet module. Releases are tagged `vX.Y.Z+W5500`. See [docs/W5500.md](docs/W5500.md) for what the fork adds; everything below is upstream's README, unchanged.
+
 <div align="center">
 
 <img src="assets/logo/banner.png" alt="Tailscale Subnet Router for ESP32-S3" width="100%">
