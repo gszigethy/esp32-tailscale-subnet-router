@@ -18,6 +18,8 @@ jobs:
   quality:
     name: Build & static analysis
     runs-on: ubuntu-latest
+    env:
+      SIZE_DIR: ${{ runner.temp }}/firmware-size
 
     steps:
       - name: Check out repository
@@ -52,7 +54,9 @@ jobs:
 
       - name: Build ESP32-S3 firmware
         shell: bash
-        run: pio run -e esp32-s3 | tee /tmp/head-size.txt
+        run: |
+          mkdir -p "$SIZE_DIR"
+          pio run -e esp32-s3 | tee "$SIZE_DIR/head-size.txt"
 
       - name: Static analysis (Cppcheck)
         run: pio check -e esp32-s3 --skip-packages --fail-on-defect=high
@@ -65,9 +69,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-format-18
-          git diff --no-color --unified=0 "$BASE_SHA" HEAD -- main/*.c main/*.h 'components/**/*.c' 'components/**/*.h' | clang-format-diff-18 -p1 -style=file -binary clang-format-18 > /tmp/format.patch
-          if [ -s /tmp/format.patch ]; then
-            cat /tmp/format.patch
+          git diff --no-color --unified=0 "$BASE_SHA" HEAD -- main/*.c main/*.h 'components/**/*.c' 'components/**/*.h' | clang-format-diff-18 -p1 -style=file -binary clang-format-18 > "$RUNNER_TEMP/format.patch"
+          if [ -s "$RUNNER_TEMP/format.patch" ]; then
+            cat "$RUNNER_TEMP/format.patch"
             exit 1
           fi
 
@@ -75,12 +79,12 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          pio run -e esp32-s3 -t size >> /tmp/head-size.txt
-          stat -c '%s' .pio/build/esp32-s3/firmware.bin > /tmp/head-bytes.txt
+          pio run -e esp32-s3 -t size >> "$SIZE_DIR/head-size.txt"
+          stat -c '%s' .pio/build/esp32-s3/firmware.bin > "$SIZE_DIR/head-bytes.txt"
           if [ -n "$BASE_SHA" ]; then
-            git worktree add --detach /tmp/firmware-base "$BASE_SHA"
-            git -C /tmp/firmware-base submodule update --init --recursive
-            (cd /tmp/firmware-base && pio run -e esp32-s3) > /tmp/base-size.txt
-            stat -c '%s' /tmp/firmware-base/.pio/build/esp32-s3/firmware.bin > /tmp/base-bytes.txt
+            git worktree add --detach "$SIZE_DIR/base" "$BASE_SHA"
+            git -C "$SIZE_DIR/base" submodule update --init --recursive
+            (cd "$SIZE_DIR/base" && pio run -e esp32-s3) > "$SIZE_DIR/base-size.txt"
+            stat -c '%s' "$SIZE_DIR/base/.pio/build/esp32-s3/firmware.bin" > "$SIZE_DIR/base-bytes.txt"
           fi
           python .github/ci/firmware_size.py
