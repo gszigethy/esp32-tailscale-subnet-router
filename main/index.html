@@ -1571,6 +1571,76 @@
         <span style="color:var(--warning); font-weight:var(--weight-semibold);">View →</span>
       </div>
 
+      <!-- Ethernet uplink card (full-width) -->
+      <div class="card card-stripe-neutral mb-4" id="card-eth">
+        <div class="card-header">
+          <div class="card-header-left">
+            <span class="card-header-icon">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="8" width="8" height="8" rx="1"/>
+                <rect x="14" y="8" width="8" height="8" rx="1"/>
+                <line x1="10" y1="12" x2="14" y2="12"/>
+              </svg>
+            </span>
+            <span class="card-title">Ethernet Uplink</span>
+          </div>
+          <span class="badge badge-neutral" id="eth-status-badge">—</span>
+        </div>
+        <div class="stat-list">
+          <div class="stat-row" style="padding-bottom:0.5rem; border-bottom:1px solid var(--border);">
+            <span class="stat-label" style="align-self:center;">Use as uplink</span>
+            <span class="stat-value flex items-center gap-2">
+              <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer; margin:0;">
+                <input type="checkbox" id="eth-uplink-en-toggle">
+              </label>
+              <button class="btn btn-sm btn-primary" id="eth-uplink-save" style="padding:0.2rem 0.6rem; font-size:0.8rem;">Save</button>
+              <span id="eth-uplink-status" style="font-size:0.8rem; color:var(--success); display:none;">Saved</span>
+            </span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">IP Address</span>
+            <span class="stat-value mono" id="eth-ip">—</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Gateway</span>
+            <span class="stat-value mono" id="eth-gateway">—</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Subnet CIDR</span>
+            <span class="stat-value mono" id="eth-cidr">—</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">DNS</span>
+            <span class="stat-value mono" id="eth-dns">—</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">MAC</span>
+            <span class="stat-value mono" id="eth-mac">—</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Traffic</span>
+            <span class="stat-value mono" id="eth-traffic">—</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Subnet routing</span>
+            <span class="stat-value flex items-center gap-2">
+              <span class="badge badge-neutral" id="eth-route-badge">—</span>
+              <span class="mono" id="eth-route-cidr" style="font-size:0.85rem;"></span>
+            </span>
+          </div>
+          <div class="stat-row" style="padding-top:0.5rem; border-top:1px solid var(--border);">
+            <span class="stat-label" style="align-self:center;">Auto-route</span>
+            <span class="stat-value flex items-center gap-2">
+              <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer; margin:0;">
+                <input type="checkbox" id="eth-route-en-toggle">
+              </label>
+              <button class="btn btn-sm btn-primary" id="eth-route-save" style="padding:0.2rem 0.6rem; font-size:0.8rem;">Save</button>
+              <span id="eth-route-status" style="font-size:0.8rem; color:var(--success); display:none;">Saved</span>
+            </span>
+          </div>
+        </div>
+      </div>
+
       <!-- Row 1: Uplink + AP (side by side on tablet+) -->
       <div class="grid grid-cols-2 mb-4">
 
@@ -1584,11 +1654,21 @@
                   <circle cx="12" cy="20" r="1"/>
                 </svg>
               </span>
-              <span class="card-title">Uplink WiFi</span>
+              <span class="card-title">WiFi Uplink</span>
             </div>
             <span class="badge badge-neutral" id="uplink-status-badge">—</span>
           </div>
           <div class="stat-list">
+            <div class="stat-row" style="padding-bottom:0.5rem; border-bottom:1px solid var(--border);">
+              <span class="stat-label" style="align-self:center;">Use as uplink</span>
+              <span class="stat-value flex items-center gap-2">
+                <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer; margin:0;">
+                  <input type="checkbox" id="wifi-uplink-en-toggle">
+                </label>
+                <button class="btn btn-sm btn-primary" id="wifi-uplink-save" style="padding:0.2rem 0.6rem; font-size:0.8rem;">Save</button>
+                <span id="wifi-uplink-status" style="font-size:0.8rem; color:var(--success); display:none;">Saved</span>
+              </span>
+            </div>
             <div class="stat-row">
               <span class="stat-label">SSID</span>
               <span class="stat-value flex items-center gap-2">
@@ -1625,6 +1705,23 @@
             <div class="stat-row">
               <span class="stat-label">Traffic</span>
               <span class="stat-value mono" id="uplink-traffic">—</span>
+            </div>
+            <div class="stat-row">
+              <span class="stat-label">Subnet routing</span>
+              <span class="stat-value flex items-center gap-2">
+                <span class="badge badge-neutral" id="sta-route-badge">—</span>
+                <span class="mono" id="sta-route-cidr" style="font-size:0.85rem;"></span>
+              </span>
+            </div>
+            <div class="stat-row" style="padding-top:0.5rem; border-top:1px solid var(--border);">
+              <span class="stat-label" style="align-self:center;">Auto-route</span>
+              <span class="stat-value flex items-center gap-2">
+                <label style="display:flex; align-items:center; gap:0.4rem; cursor:pointer; margin:0;">
+                  <input type="checkbox" id="sta-route-en-toggle">
+                </label>
+                <button class="btn btn-sm btn-primary" id="sta-route-save" style="padding:0.2rem 0.6rem; font-size:0.8rem;">Save</button>
+                <span id="sta-route-status" style="font-size:0.8rem; color:var(--success); display:none;">Saved</span>
+              </span>
             </div>
           </div>
         </div>
@@ -1828,7 +1925,7 @@
       <div class="page-header">
         <div class="page-header-left">
           <h1 class="page-title">Network</h1>
-          <p class="page-subtitle">Uplink WiFi, access point, IP configuration</p>
+          <p class="page-subtitle">WiFi uplink, access point, IP configuration</p>
         </div>
       </div>
 
@@ -2370,7 +2467,7 @@
           </div>
         </div>
         <div class="card-body">
-          <p class="form-hint" style="margin:0 0 0.75rem 0;">Rough 1 MB transfer over the device's own STA uplink (Cloudflare endpoint). Confirms whether a slowdown is upstream of the router vs. an AP-client / forwarding issue — self-origin traffic bypasses any exit-node tunnel. Timing excludes the TLS handshake.</p>
+          <p class="form-hint" style="margin:0 0 0.75rem 0;">Rough 1 MB transfer over the device's own uplink (Cloudflare endpoint) — Ethernet or WiFi, whichever currently holds the default route. Confirms whether a slowdown is upstream of the router vs. an AP-client / forwarding issue — self-origin traffic bypasses any exit-node tunnel. Timing excludes the TLS handshake.</p>
           <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
             <button class="btn btn-primary btn-md" id="tool-net-down">⬇ Download 1 MB</button>
             <button class="btn btn-primary btn-md" id="tool-net-up">⬆ Upload 1 MB</button>
@@ -2864,8 +2961,8 @@
           <p style="margin:0 0 0.5rem 0;"><strong>esp32-tailscale-subnet-router</strong> — a single-board ESP32-S3 router that joins your IoT subnet directly to a Tailscale (or Headscale) tailnet, so remote peers can reach LAN devices behind a CGNAT or a phone hotspot without port forwarding.</p>
           <div class="stat-row"><span class="stat-label">Firmware version</span><span class="stat-value mono" id="about-version">—</span></div>
           <div class="stat-row"><span class="stat-label">Build tag</span>       <span class="stat-value mono" id="about-build-tag" title="—">—</span></div>
-          <div class="stat-row"><span class="stat-label">Source</span><span class="stat-value mono"><a href="https://github.com/Csontikka/esp32-tailscale-subnet-router" target="_blank" rel="noopener" style="color:var(--accent);">github.com/Csontikka/esp32-tailscale-subnet-router</a></span></div>
-          <div class="stat-row"><span class="stat-label">Issues</span><span class="stat-value mono"><a href="https://github.com/Csontikka/esp32-tailscale-subnet-router/issues" target="_blank" rel="noopener" style="color:var(--accent);">github.com/&hellip;/issues</a></span></div>
+          <div class="stat-row"><span class="stat-label">Source</span><span class="stat-value mono"><a href="https://github.com/gszigethy/esp32-tailscale-subnet-router" target="_blank" rel="noopener" style="color:var(--accent);">github.com/gszigethy/esp32-tailscale-subnet-router</a></span></div>
+          <div class="stat-row"><span class="stat-label">Issues</span><span class="stat-value mono"><a href="https://github.com/gszigethy/esp32-tailscale-subnet-router/issues" target="_blank" rel="noopener" style="color:var(--accent);">github.com/&hellip;/issues</a></span></div>
           <div class="stat-row"><span class="stat-label">Tailscale stack</span><span class="stat-value mono"><a href="https://github.com/Csontikka/microlink" target="_blank" rel="noopener" style="color:var(--accent);">Csontikka/microlink</a> (userspace WireGuard + DERP + DISCO)</span></div>
           <div class="stat-row"><span class="stat-label">License</span><span class="stat-value mono">MIT — see LICENSE in the repo</span></div>
           <div class="stat-row" title="Sends a SHA-256 device hash + boot/flash counters + firmware version every 24 h. Never sends SSIDs, IP addresses, MAC addresses, or peer information.">
@@ -3302,21 +3399,114 @@
 
       var uplinkBadge = document.getElementById('uplink-status-badge');
       var overall    = document.getElementById('overall-badge');
-      if (ul.connected) {
+      /* Three states, not two: an operator who switched WiFi off is looking at
+       * a healthy wired router, so render that neutrally. Only a WiFi uplink
+       * that is meant to be up and isn't counts as a fault. */
+      if (ul.uplink_en === false) {
+        uplinkBadge.className = 'badge badge-neutral';
+        uplinkBadge.textContent = 'Disabled';
+        document.getElementById('card-uplink').className = 'card card-stripe-neutral';
+      } else if (ul.connected) {
         uplinkBadge.className = 'badge badge-success';
         uplinkBadge.textContent = 'Connected';
         document.getElementById('card-uplink').className = 'card card-stripe-success';
-        /* Restore overall-badge to Online — a momentary disconnect on an
-         * earlier tick used to bump it to Degraded and the badge stayed
-         * stuck until the operator reloaded the page. */
-        overall.className = 'badge badge-success';
-        overall.innerHTML = '<span class="badge-dot badge-dot-pulse"></span> Online';
       } else {
         uplinkBadge.className = 'badge badge-danger';
         uplinkBadge.textContent = 'Disconnected';
         document.getElementById('card-uplink').className = 'card card-stripe-danger';
+      }
+
+      /* Reflect the switch itself, unless the operator is mid-edit. */
+      var wuToggle = document.getElementById('wifi-uplink-en-toggle');
+      if (wuToggle && !wuToggle._touched) {
+        wuToggle.checked = (ul.uplink_en !== false);
+      }
+
+      /* Overall health is per-router, not per-interface: either uplink being
+       * up means we can route, so only flag Degraded when BOTH are down. A
+       * wired-only box (or a WiFi-only box) is fully healthy. Recomputed on
+       * every tick so a momentary flap can't leave the badge stuck. */
+      var anyUplink = !!(ul.connected || (data.eth && data.eth.connected));
+      if (anyUplink) {
+        overall.className = 'badge badge-success';
+        overall.innerHTML = '<span class="badge-dot badge-dot-pulse"></span> Online';
+      } else {
         overall.className = 'badge badge-warning';
         overall.innerHTML = '<span class="badge-dot"></span> Degraded';
+      }
+
+      // STA subnet routing state
+      var staRouteBadge  = document.getElementById('sta-route-badge');
+      var staRouteCidrEl = document.getElementById('sta-route-cidr');
+      var staRouteToggle = document.getElementById('sta-route-en-toggle');
+      if (staRouteBadge) {
+        if (ul.route_en) {
+          staRouteBadge.className = 'badge badge-success';
+          staRouteBadge.textContent = 'On';
+          if (staRouteCidrEl) staRouteCidrEl.textContent = ul.route_cidr || '(detecting…)';
+        } else {
+          staRouteBadge.className = 'badge badge-neutral';
+          staRouteBadge.textContent = 'Off';
+          if (staRouteCidrEl) staRouteCidrEl.textContent = '';
+        }
+        if (staRouteToggle && !staRouteToggle._touched) {
+          staRouteToggle.checked = !!ul.route_en;
+        }
+      }
+
+      // ETH (wired uplink)
+      var eth = data.eth || {};
+      var ethCard = document.getElementById('card-eth');
+      if (ethCard) {
+        document.getElementById('eth-ip').textContent      = eth.ip ? (eth.ip + (eth.prefix != null ? '/' + eth.prefix : '')) : '—';
+        document.getElementById('eth-gateway').textContent = eth.gateway || '—';
+        document.getElementById('eth-cidr').textContent    = eth.cidr    || '—';
+        document.getElementById('eth-dns').textContent     = eth.dns     || '—';
+        document.getElementById('eth-mac').textContent     = eth.mac     || '—';
+        document.getElementById('eth-traffic').textContent = formatTraffic(eth.bytes_in, eth.bytes_out);
+        var ethBadge = document.getElementById('eth-status-badge');
+        /* Three states, mirroring the WiFi uplink card's "Disabled" case —
+         * but unlike WiFi, "Disconnected" here stays neutral, not danger:
+         * ETH hardware is an optional add-on (Kconfig-gated), so this card
+         * renders even when no W5500 is physically present, and a permanent
+         * red badge on every WiFi-only device would be a false alarm. */
+        if (eth.uplink_en === false) {
+          ethBadge.className = 'badge badge-neutral';
+          ethBadge.textContent = 'Disabled';
+          ethCard.className = 'card card-stripe-neutral mb-4';
+        } else if (eth.connected) {
+          ethBadge.className = 'badge badge-success';
+          ethBadge.textContent = 'Connected';
+          ethCard.className = 'card card-stripe-success mb-4';
+        } else {
+          ethBadge.className = 'badge badge-neutral';
+          ethBadge.textContent = 'Disconnected';
+          ethCard.className = 'card card-stripe-neutral mb-4';
+        }
+
+        /* Reflect the switch itself, unless the operator is mid-edit. */
+        var euToggle = document.getElementById('eth-uplink-en-toggle');
+        if (euToggle && !euToggle._touched) {
+          euToggle.checked = (eth.uplink_en !== false);
+        }
+
+        // Subnet routing state
+        var routeBadge = document.getElementById('eth-route-badge');
+        var routeCidrEl = document.getElementById('eth-route-cidr');
+        var routeToggle = document.getElementById('eth-route-en-toggle');
+        if (eth.route_en) {
+          routeBadge.className = 'badge badge-success';
+          routeBadge.textContent = 'On';
+          routeCidrEl.textContent = eth.route_cidr || '(detecting…)';
+        } else {
+          routeBadge.className = 'badge badge-neutral';
+          routeBadge.textContent = 'Off';
+          routeCidrEl.textContent = '';
+        }
+        // Only set toggle on first load to avoid fighting the user mid-edit
+        if (routeToggle && !routeToggle._touched) {
+          routeToggle.checked = !!eth.route_en;
+        }
       }
 
       // AP
@@ -3332,6 +3522,8 @@
       var apClientsBadge = document.getElementById('ap-clients-badge');
       apClientsBadge.textContent = (ap.clients != null ? ap.clients + ' client' + (ap.clients !== 1 ? 's' : '') : '—');
       apClientsBadge.className = (typeof ap.clients === 'number' && ap.clients > 0) ? 'badge badge-success' : 'badge badge-neutral';
+
+      // AP subnet routing state
 
       /* System tile — internal DRAM + SPIRAM bars, CPU load %, CPU temp.
        * Backend reports mem_internal_free/total, mem_spiram_free/total,
@@ -5652,6 +5844,159 @@
         });
     });
 
+    // ETH subnet routing toggle — Status card Save button
+    (function () {
+      var toggle = document.getElementById('eth-route-en-toggle');
+      var saveBtn = document.getElementById('eth-route-save');
+      var statusEl = document.getElementById('eth-route-status');
+      if (!toggle || !saveBtn) return;
+
+      // Mark touched so applyStatus() stops overwriting the checkbox
+      toggle.addEventListener('change', function () { toggle._touched = true; });
+
+      saveBtn.addEventListener('click', function () {
+        var enabled = toggle.checked;
+        saveBtn.disabled = true;
+        saveBtn.textContent = '…';
+        apiFetch('/api/eth-routing', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ enabled: enabled })
+        })
+          .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+          .then(function (resp) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            toggle._touched = false;   // allow next status poll to sync
+            // Update badge immediately from the response
+            var rb = document.getElementById('eth-route-badge');
+            var rc = document.getElementById('eth-route-cidr');
+            if (rb) { rb.className = resp.route_en ? 'badge badge-success' : 'badge badge-neutral'; rb.textContent = resp.route_en ? 'On' : 'Off'; }
+            if (rc) rc.textContent = resp.route_en ? (resp.route_cidr || '(detecting…)') : '';
+            if (statusEl) { statusEl.style.display = 'inline'; setTimeout(function () { statusEl.style.display = 'none'; }, 2500); }
+            showToast('success', 'Saved', 'Ethernet subnet routing ' + (enabled ? 'enabled' : 'disabled') + '.', 4000);
+          })
+          .catch(function (e) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            showToast('error', 'Save failed', e && e.message ? e.message : 'unknown error', 6000);
+          });
+      });
+    })();
+
+    // WiFi uplink master switch — Status card Save button
+    (function () {
+      var toggle   = document.getElementById('wifi-uplink-en-toggle');
+      var saveBtn  = document.getElementById('wifi-uplink-save');
+      var statusEl = document.getElementById('wifi-uplink-status');
+      if (!toggle || !saveBtn) return;
+      toggle.addEventListener('change', function () { toggle._touched = true; });
+      saveBtn.addEventListener('click', function () {
+        var enabled = toggle.checked;
+        saveBtn.disabled = true;
+        saveBtn.textContent = '…';
+        apiFetch('/api/wifi-uplink', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ enabled: enabled })
+        })
+          .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+          .then(function (resp) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            toggle._touched = false;
+            toggle.checked = !!resp.uplink_en;
+            if (statusEl) { statusEl.style.display = 'inline'; setTimeout(function () { statusEl.style.display = 'none'; }, 2500); }
+            /* Enabling with an empty network list can't associate — say so
+               rather than leaving the operator waiting for a link. */
+            if (resp.uplink_en && !resp.networks) {
+              showToast('warning', 'No networks saved',
+                        'WiFi uplink is on but no network is configured. Add one under Network → WiFi.', 7000);
+            } else {
+              showToast('success', 'Saved',
+                        'WiFi uplink ' + (resp.uplink_en ? 'enabled' : 'disabled') + '.', 4000);
+            }
+          })
+          .catch(function (e) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            showToast('error', 'Save failed', e && e.message ? e.message : 'unknown error', 6000);
+          });
+      });
+    })();
+
+    // Ethernet uplink master switch — Status card Save button
+    (function () {
+      var toggle   = document.getElementById('eth-uplink-en-toggle');
+      var saveBtn  = document.getElementById('eth-uplink-save');
+      var statusEl = document.getElementById('eth-uplink-status');
+      if (!toggle || !saveBtn) return;
+      toggle.addEventListener('change', function () { toggle._touched = true; });
+      saveBtn.addEventListener('click', function () {
+        var enabled = toggle.checked;
+        saveBtn.disabled = true;
+        saveBtn.textContent = '…';
+        apiFetch('/api/eth-uplink', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ enabled: enabled })
+        })
+          .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+          .then(function (resp) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            toggle._touched = false;
+            toggle.checked = !!resp.uplink_en;
+            if (statusEl) { statusEl.style.display = 'inline'; setTimeout(function () { statusEl.style.display = 'none'; }, 2500); }
+            showToast('success', 'Saved',
+                      'Ethernet uplink ' + (resp.uplink_en ? 'enabled' : 'disabled') + '.', 4000);
+          })
+          .catch(function (e) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            showToast('error', 'Save failed', e && e.message ? e.message : 'unknown error', 6000);
+          });
+      });
+    })();
+
+    // STA subnet routing toggle — Status card Save button
+    (function () {
+      var toggle = document.getElementById('sta-route-en-toggle');
+      var saveBtn = document.getElementById('sta-route-save');
+      var statusEl = document.getElementById('sta-route-status');
+      if (!toggle || !saveBtn) return;
+      toggle.addEventListener('change', function () { toggle._touched = true; });
+      saveBtn.addEventListener('click', function () {
+        var enabled = toggle.checked;
+        saveBtn.disabled = true;
+        saveBtn.textContent = '…';
+        apiFetch('/api/sta-routing', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ enabled: enabled })
+        })
+          .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+          .then(function (resp) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            toggle._touched = false;
+            var rb = document.getElementById('sta-route-badge');
+            var rc = document.getElementById('sta-route-cidr');
+            if (rb) { rb.className = resp.route_en ? 'badge badge-success' : 'badge badge-neutral'; rb.textContent = resp.route_en ? 'On' : 'Off'; }
+            if (rc) rc.textContent = resp.route_en ? (resp.route_cidr || '(detecting…)') : '';
+            if (statusEl) { statusEl.style.display = 'inline'; setTimeout(function () { statusEl.style.display = 'none'; }, 2500); }
+            showToast('success', 'Saved', 'WiFi subnet routing ' + (enabled ? 'enabled' : 'disabled') + '.', 4000);
+          })
+          .catch(function (e) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'Save';
+            showToast('error', 'Save failed', e && e.message ? e.message : 'unknown error', 6000);
+          });
+      });
+    })();
+
+    // AP subnet routing toggle — Status card Save button
+
     // =====================================================================
     // FIREWALL PAGE
     // =====================================================================
@@ -6341,7 +6686,7 @@
       var el = document.getElementById('sys-ota-notes');
       if (!el) return;
       el.textContent = 'Loading from GitHub…';
-      fetch('https://api.github.com/repos/Csontikka/esp32-tailscale-subnet-router/releases', { cache: 'no-store' })
+      fetch('https://api.github.com/repos/gszigethy/esp32-tailscale-subnet-router/releases', { cache: 'no-store' })
         .then(function (r) {
           if (r.status === 403) throw new Error('rate-limited');
           if (!r.ok) throw new Error('HTTP ' + r.status);
