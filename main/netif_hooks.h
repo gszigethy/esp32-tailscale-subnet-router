@@ -21,6 +21,9 @@ extern "C" {
 #endif
 
 void netif_hooks_init(void);
+/* W5500 fork: put the ETH hooks back if a netif restart overwrote them.
+ * Idempotent; called on every IP_EVENT_ETH_GOT_IP. */
+void netif_hooks_ensure_eth(void);
 
 /* Wire-byte counters — accumulated in the four hook tap points before
  * the ACL check, so they represent everything that actually hit the

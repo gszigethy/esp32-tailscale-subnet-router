@@ -298,6 +298,28 @@ static err_t ap_linkoutput_hook(struct netif *netif, struct pbuf *p)
     return original_ap_linkoutput ? original_ap_linkoutput(netif, p) : ERR_VAL;
 }
 
+/* (Re)install the ETH hooks unless they are already in place. esp_netif's
+ * start path runs netif_add(..., ethernetif_init, tcpip_input) on every
+ * ETHERNET_EVENT_START, which rewrites netif->input and ->linkoutput: at
+ * boot that event can be handled after netif_hooks_init() has run, and every
+ * "Use as uplink" off/on cycle repeats it. A hook written once would then be
+ * silently gone -- firewall TO_ESP/FROM_ESP rules, TTL override and ETH
+ * counters all bypassed while the UI shows them active. main.c calls this on
+ * every IP_EVENT_ETH_GOT_IP, which always follows that netif_add. */
+void netif_hooks_ensure_eth(void)
+{
+    esp_netif_t *eth = esp_netif_get_handle_from_ifkey("ETH_DEF");
+    struct netif *nif = eth ? esp_netif_get_netif_impl(eth) : NULL;
+    if (!nif || nif->input == eth_input_hook) return;
+    /* Originals first: a packet may arrive between the two writes and the
+     * hook must never call through a stale or NULL original. */
+    original_eth_input      = nif->input;
+    original_eth_linkoutput = nif->linkoutput;
+    nif->input              = eth_input_hook;
+    nif->linkoutput         = eth_linkoutput_hook;
+    ESP_LOGI(TAG, "ETH hooks installed on %c%c%d", nif->name[0], nif->name[1], nif->num);
+}
+
 void netif_hooks_init(void)
 {
     static bool installed = false;
@@ -331,16 +353,7 @@ void netif_hooks_init(void)
         }
     }
 
-    if (eth) {
-        struct netif *nif = esp_netif_get_netif_impl(eth);
-        if (nif) {
-            original_eth_input      = nif->input;
-            original_eth_linkoutput = nif->linkoutput;
-            nif->input              = eth_input_hook;
-            nif->linkoutput         = eth_linkoutput_hook;
-            ESP_LOGI(TAG, "ETH hooks installed on %c%c%d", nif->name[0], nif->name[1], nif->num);
-        }
-    }
+    netif_hooks_ensure_eth();
 
     installed = (sta != NULL) || (ap != NULL) || (eth != NULL);
 }

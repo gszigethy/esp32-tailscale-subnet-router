@@ -57,8 +57,7 @@ idf_component_register(SRCS "main.c"
                                   espcoredump dns_relay snmp_agent cli
                                   app_update esp_https_ota
                                   esp_eth driver
-                    INCLUDE_DIRS "."
-                    LDFRAGMENTS "linker.lf")
+                    INCLUDE_DIRS ".")
 
 # Phase 1.9k: wrap ip_napt_forward to skip NAPT for tailnet CGNAT
 # (100.64/10) destinations. Otherwise NAPT rewrites the AP-client
