@@ -18,8 +18,6 @@ jobs:
   quality:
     name: Build & static analysis
     runs-on: ubuntu-latest
-    env:
-      SIZE_DIR: ${{ runner.temp }}/firmware-size
 
     steps:
       - name: Check out repository
@@ -27,6 +25,9 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
+
+      - name: Initialize report directory
+        run: echo "SIZE_DIR=$RUNNER_TEMP/firmware-size" >> "$GITHUB_ENV"
 
       - name: Cache PlatformIO
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
