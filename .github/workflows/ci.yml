@@ -51,7 +51,8 @@ jobs:
         run: git diff --check "${{ github.event.pull_request.base.sha || github.event.before || github.sha }}" HEAD
 
       - name: Build ESP32-S3 firmware
-        run: pio run -e esp32-s3
+        shell: bash
+        run: pio run -e esp32-s3 | tee /tmp/head-size.txt
 
       - name: Static analysis (Cppcheck)
         run: pio check -e esp32-s3 --skip-packages --fail-on-defect=high
@@ -64,7 +65,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-format-18
-          git diff --no-color --unified=0 "$BASE_SHA" HEAD -- main/*.c main/*.h 'components/**/*.c' 'components/**/*.h' | clang-format-diff-18 -p1 -style=file > /tmp/format.patch
+          git diff --no-color --unified=0 "$BASE_SHA" HEAD -- main/*.c main/*.h 'components/**/*.c' 'components/**/*.h' | clang-format-diff-18 -p1 -style=file -binary clang-format-18 > /tmp/format.patch
           if [ -s /tmp/format.patch ]; then
             cat /tmp/format.patch
             exit 1
@@ -74,7 +75,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          pio run -e esp32-s3 -t size > /tmp/head-size.txt
+          pio run -e esp32-s3 -t size >> /tmp/head-size.txt
           stat -c '%s' .pio/build/esp32-s3/firmware.bin > /tmp/head-bytes.txt
           if [ -n "$BASE_SHA" ]; then
             git worktree add --detach /tmp/firmware-base "$BASE_SHA"
