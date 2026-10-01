@@ -71,7 +71,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-format-18
-          git diff --no-color --unified=0 "$BASE_SHA" HEAD -- main/*.c main/*.h 'components/**/*.c' 'components/**/*.h' | clang-format-diff-18 -p1 -style=file -binary clang-format-18 > "$RUNNER_TEMP/format.patch"
+          git diff --no-color --unified=0 "$BASE_SHA" HEAD -- 'main/*.c' 'main/*.h' 'components/**/*.c' 'components/**/*.h' > "$RUNNER_TEMP/source.diff"
+          if [ ! -s "$RUNNER_TEMP/source.diff" ]; then
+            echo "No changed C/C++ lines to format."
+            exit 0
+          fi
+          clang-format-diff-18 -p1 -style=file -binary clang-format-18 < "$RUNNER_TEMP/source.diff" > "$RUNNER_TEMP/format.patch"
           if [ -s "$RUNNER_TEMP/format.patch" ]; then
             cat "$RUNNER_TEMP/format.patch"
             exit 1
