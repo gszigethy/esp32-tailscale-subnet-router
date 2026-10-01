@@ -50,14 +50,25 @@ static inline bool ip_in_cgnat(uint32_t ip_host_order)
     return (ip_host_order & TAILSCALE_CGNAT_MASK) == TAILSCALE_CGNAT_NET;
 }
 
+/* The WireGuard tunnel netif. wireguardif names it "wg" (the same test
+ * tailscale_mtu.c and the SNMP agent use). Identified by name, not by a
+ * 100.64.0.0/10 address: an uplink can legitimately hold a CGNAT address too
+ * (Starlink, many LTE/5G routers, some ISPs), and whichever of the two came
+ * first in netif_list used to be taken for the tunnel -- the uplink itself
+ * whenever the tunnel had no address yet. */
+static inline bool netif_is_wg(const struct netif *n)
+{
+    return n && n->name[0] == 'w' && n->name[1] == 'g';
+}
+
 static struct netif *find_wg_netif(void)
 {
     extern struct netif *netif_list;
     for (struct netif *n = netif_list; n; n = n->next) {
+        if (!netif_is_wg(n)) continue;
         const ip4_addr_t *addr = netif_ip4_addr(n);
         if (addr == NULL || ip4_addr_isany_val(*addr)) continue;
-        uint32_t ip = lwip_ntohl(ip4_addr_get_u32(addr));
-        if (ip_in_cgnat(ip)) return n;
+        return n;
     }
     return NULL;
 }
@@ -394,7 +405,7 @@ struct netif *__wrap_ip4_route_src_hook(const ip4_addr_t *src,
             if (addr == NULL || mask == NULL) continue;
             if (ip4_addr_isany_val(*addr)) continue;
             /* Skip the WG netif (CGNAT — handled in step 1, would loop). */
-            if (ip_in_cgnat(lwip_ntohl(ip4_addr_get_u32(addr)))) continue;
+            if (netif_is_wg(n)) continue;
 
             /* 2a: dst sits inside this netif's own prefix. This MUST include
              * the AP netif — packets to 192.168.4.x (AP clients, e.g. Pi at
@@ -624,7 +635,7 @@ void route_explain(uint32_t src_hbo, uint32_t dst_hbo,
             const ip4_addr_t *addr = netif_ip4_addr(n);
             const ip4_addr_t *mask = netif_ip4_netmask(n);
             if (!addr || !mask || ip4_addr_isany_val(*addr)) continue;
-            if (ip_in_cgnat(lwip_ntohl(ip4_addr_get_u32(addr)))) continue;
+            if (netif_is_wg(n)) continue;   /* mirrors the hook */
             if ((dst.addr & mask->addr) == (addr->addr & mask->addr)) {
                 name_netif(n, out_netif, out_netif_size);
                 snprintf(out, out_size,
