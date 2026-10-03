@@ -187,6 +187,7 @@ volatile uint8_t sta_uplink_en = 0;
 /* Non-static — also called from web_ui.c when DNS-relay state changes,
  * so the new DHCP-offered DNS takes effect immediately for new leases. */
 void softap_set_dns_addr(esp_netif_t *esp_netif_ap, esp_netif_t *esp_netif_sta);
+static void ap_refresh_uplink_dns(void);
 /* Used by both wifi_event_handler (STA got-IP) and eth_ip_event_handler. */
 static void cidr_from_dhcp_event(const ip_event_got_ip_t *ev, char *out, size_t out_size);
 
@@ -197,6 +198,15 @@ static void cidr_from_dhcp_event(const ip_event_got_ip_t *ev, char *out, size_t 
 static void dns_relay_state_cb(bool healthy)
 {
     (void)healthy;
+    ap_refresh_uplink_dns();
+}
+
+/* Match the physical uplink policy: leased Ethernet takes precedence over
+ * leased STA. Use the application's state, updated before this call, rather
+ * than the Ethernet status cache, whose event handler runs separately.
+ * A NULL source still applies relay/custom DNS or the public fallback. */
+static void ap_refresh_uplink_dns(void)
+{
     esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
     /* Use the active uplink for the DNS source, not a hardcoded STA lookup.
      * When ETH is the primary uplink and WiFi STA is not connected, looking
@@ -205,14 +215,12 @@ static void dns_relay_state_cb(bool healthy)
      * fallback, hiding the router's upstream resolver from AP clients. */
     esp_netif_t *uplink = NULL;
 #ifdef CONFIG_ETH_W5500_ENABLED
-    if (eth_uplink_connected())
+    if (eth_connect)
         uplink = esp_netif_get_handle_from_ifkey("ETH_DEF");
 #endif
-    if (!uplink)
+    if (!uplink && sta_connect)
         uplink = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    ESP_LOGI(TAG_AP, "DNS relay state changed → healthy=%d — reapplying softap DNS",
-             (int)healthy);
-    if (ap && uplink) softap_set_dns_addr(ap, uplink);
+    if (ap) softap_set_dns_addr(ap, uplink);
 }
 
 /* Multi-network rotation state. Index 0 is preferred; on association
@@ -421,6 +429,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         bool sta_was_up = sta_connect;
         sta_connect = 0;
         uplink_state_changed();
+        if (sta_was_up) ap_refresh_uplink_dns();
         /* With ETH carrying the tunnel, a lost STA only matters if its subnet
          * was advertised: reconnect so the stale route is withdrawn. (Fires
          * on every retry, hence only on the up -> down transition.) */
@@ -523,9 +532,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
          * clients can resolve names through us. Runs every time we
          * (re-)acquire an STA IP — DNS may have changed on the new
          * uplink, and DHCP server restart is idempotent. */
-        esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-        esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-        if (ap && sta) softap_set_dns_addr(ap, sta);
+        ap_refresh_uplink_dns();
 
         /* Re-bind the NAPT portmap entries to the freshly-acquired
          * STA IP. portmap_install_all is idempotent — duplicate bindings
@@ -567,6 +574,7 @@ static void eth_uplink_went_down(const char *why)
     eth_connect = 0;
     uplink_state_changed();
     default_route_to_sta();
+    ap_refresh_uplink_dns();
     tailscale_kick();
     portmap_install_all();   /* re-bind forwards to the remaining uplink */
 }
@@ -623,8 +631,7 @@ static void eth_ip_event_handler(void *arg, esp_event_base_t event_base,
         }
 
         /* Copy the upstream (Ethernet) DNS into the AP-side DHCP options. */
-        esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-        if (ap && eth) softap_set_dns_addr(ap, eth);
+        ap_refresh_uplink_dns();
 
         /* Re-bind any portmap entries to the freshly-acquired Ethernet IP. */
         portmap_install_all();
@@ -860,7 +867,7 @@ void softap_set_dns_addr(esp_netif_t *esp_netif_ap,esp_netif_t *esp_netif_sta)
         }
         free(ap_dns_str);
     }
-    if (!used_override) {
+    if (!used_override && esp_netif_sta) {
         esp_netif_get_dns_info(esp_netif_sta, ESP_NETIF_DNS_MAIN, &dns);
     }
     if (dns.ip.u_addr.ip4.addr == 0) {
