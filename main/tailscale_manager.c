@@ -459,44 +459,86 @@ void tailscale_connect_task(void *pvParameters)
  * absent" default would disagree with main.c's (ETH defaults on). */
 extern volatile uint8_t eth_route_en;
 extern volatile uint8_t sta_route_en;
+/* Live uplink state (main.c). A cached CIDR is only advertised while its
+ * uplink holds a lease: advertising a LAN the router cannot currently reach
+ * makes tailnet clients send that subnet into a dead end. main.c reconnects
+ * Tailscale on every uplink up/down, which re-runs this composition. */
+extern volatile int eth_connect;
+extern volatile int sta_connect;
 
-/* Append `cidr` as a new line unless it is empty, already listed, or does not
- * fit. `buf` is a newline-separated list, NUL-terminated. */
-static void routes_append_unique(char *buf, size_t buf_size, const char *cidr)
+/* Append `cidr` as a new line unless it is empty or already listed. Returns
+ * false when it does not fit, i.e. it was dropped. `buf` is a NUL-terminated,
+ * newline-separated list. */
+static bool routes_append_unique(char *buf, size_t buf_size, const char *cidr)
 {
-    if (!cidr || !cidr[0]) return;
+    if (!cidr || !cidr[0]) return true;
     size_t clen = strlen(cidr);
     for (const char *p = buf; *p; ) {
         const char *eol = strchr(p, '\n');
         size_t len = eol ? (size_t)(eol - p) : strlen(p);
-        if (len == clen && strncmp(p, cidr, clen) == 0) return;
+        if (len == clen && strncmp(p, cidr, clen) == 0) return true;
         if (!eol) break;
         p = eol + 1;
     }
     size_t used = strlen(buf);
     size_t need = clen + (used ? 1 : 0);
-    if (used + need >= buf_size) return;
+    if (used + need >= buf_size) return false;
     if (used) buf[used++] = '\n';
     memcpy(buf + used, cidr, clen + 1);
+    return true;
 }
 
-static void routes_append_cached(char *buf, size_t buf_size, const char *nvs_key)
+static bool routes_append_cached(char *buf, size_t buf_size, const char *nvs_key)
 {
     char *cidr = nvs_param_get_str(nvs_key);
-    routes_append_unique(buf, buf_size, cidr);
+    bool ok = routes_append_unique(buf, buf_size, cidr);
     free(cidr);
+    return ok;
 }
 
 const char *tailscale_compose_routes(void)
 {
-    /* Same size as the upstream helper's buffer; microlink copies at most
-     * 256 bytes of it at init. Not reentrant, exactly like that helper: the
-     * connect path is serialized by s_life_mux, but a web UI preview landing
-     * in the same instant shares the buffer for that one call. */
-    static char buf[640];
-    const char *base = tailscale_advertise_routes_effective();
-    strlcpy(buf, base ? base : "", sizeof buf);
-    if (eth_route_en) routes_append_cached(buf, sizeof buf, "eth_route_cidr");
-    if (sta_route_en) routes_append_cached(buf, sizeof buf, "sta_route_cidr");
+    /* Sized to what microlink keeps: it copies advertise_routes into a
+     * 256-byte field (255 characters), so anything longer used to be cut
+     * mid-CIDR while the UI preview listed it in full. Composing into the
+     * same limit, whole entries only, makes the preview exactly what is
+     * advertised. The auto-routes go first so the zero-touch LAN routes win
+     * over a long manual list; whatever does not fit is dropped and logged.
+     * Not reentrant, exactly like the upstream helper: the connect path is
+     * serialized by s_life_mux, but a web UI preview landing in the same
+     * instant shares the buffer for that one call. */
+    static char buf[256];
+    static int  s_last_dropped = 0;
+    int dropped = 0;
+    buf[0] = '\0';
+    if (eth_route_en && eth_connect &&
+        !routes_append_cached(buf, sizeof buf, "eth_route_cidr")) dropped++;
+    if (sta_route_en && sta_connect &&
+        !routes_append_cached(buf, sizeof buf, "sta_route_cidr")) dropped++;
+
+    /* Then upstream's AP subnet + manual list, entry by entry. */
+    const char *p = tailscale_advertise_routes_effective();
+    while (p && *p) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        char cidr[64];
+        if (len > 0 && len < sizeof cidr) {
+            memcpy(cidr, p, len);
+            cidr[len] = '\0';
+            if (!routes_append_unique(buf, sizeof buf, cidr)) dropped++;
+        } else if (len > 0) {
+            dropped++;
+        }
+        p = eol ? eol + 1 : NULL;
+    }
+
+    /* Logged on change only: the web UI calls this on every preview. */
+    if (dropped != s_last_dropped) {
+        if (dropped) {
+            ESP_LOGW(TAG, "advertised routes exceed microlink's 255-byte limit; "
+                          "%d route(s) not advertised", dropped);
+        }
+        s_last_dropped = dropped;
+    }
     return buf[0] ? buf : NULL;
 }

@@ -94,17 +94,20 @@ static inline bool netif_is_ap(const struct netif *n)
     return n && n->name[0] == 'a' && n->name[1] == 'p';
 }
 
-/* True when this netif is an upstream uplink: administratively up with an
- * address, and neither the downstream AP nor the WG overlay. Structural rather
- * than name-based, so wired ETH qualifies alongside WiFi STA — the old
- * name == "st" test silently excluded Ethernet from every path below. */
+/* True when this netif is an upstream uplink: up and link-up with an address,
+ * and none of the downstream AP, the WG overlay or lwIP's loopback ("lo",
+ * present with CONFIG_LWIP_NETIF_LOOPBACK). Structural rather than one name,
+ * so wired ETH qualifies alongside WiFi STA -- the old name == "st" test
+ * silently excluded Ethernet from every path below. The overlay is excluded
+ * by identity, not by its 100.64/10 address, so an uplink that is itself
+ * addressed from CGNAT space (Starlink, many LTE routers) still counts. */
 static inline bool netif_is_uplink(const struct netif *n)
 {
     if (!n || !netif_is_up(n) || !netif_is_link_up(n)) return false;
     const ip4_addr_t *addr = netif_ip4_addr(n);
     if (addr == NULL || ip4_addr_isany_val(*addr)) return false;
-    if (netif_is_ap(n)) return false;
-    return !ip_in_cgnat(lwip_ntohl(ip4_addr_get_u32(addr)));
+    if (netif_is_ap(n) || netif_is_wg(n)) return false;
+    return !(n->name[0] == 'l' && n->name[1] == 'o');
 }
 
 /* The upstream uplink, whichever interface it happens to be.
@@ -137,7 +140,15 @@ static struct netif *find_uplink_netif(void)
  * default during boot (the WiFi STA) and we would later restore a netif that
  * has no address on a wired-only device. NULL = we are not overriding. */
 static struct netif *s_pre_exit_default = NULL;
-static bool s_wg_udp_pinned = false;
+/* The uplink the WG UDP socket is pinned to while exit-node mode is on, NULL
+ * when unpinned. A pointer rather than a flag so the pin can follow the
+ * uplink: with two of them, pulling the ETH cable must move the encapsulated
+ * WireGuard traffic to the WiFi STA instead of leaving it on a dead link. */
+static struct netif *s_wg_udp_pin = NULL;
+/* The microlink instance that pin was applied to. A Tailscale reconnect
+ * builds a new instance that starts unpinned, so a changed handle also
+ * means "pin again". */
+static microlink_t *s_wg_udp_pin_ml = NULL;
 static esp_ping_handle_t s_keepalive_ping = NULL;
 static uint32_t s_keepalive_target = 0;
 
@@ -224,11 +235,12 @@ static void route_supervisor_task(void *arg)
 
         if (tailscale_exit_node_ip != 0) {
             if (wg_ready && uplink != NULL) {
-                if (!s_wg_udp_pinned) {
-                    microlink_t *ml = tailscale_get_microlink();
+                microlink_t *ml = tailscale_get_microlink();
+                if (s_wg_udp_pin != uplink || s_wg_udp_pin_ml != ml) {
                     esp_err_t pr = ml ? microlink_pin_wg_output_netif(ml, uplink) : ESP_ERR_INVALID_STATE;
                     if (pr == ESP_OK) {
-                        s_wg_udp_pinned = true;
+                        s_wg_udp_pin = uplink;
+                        s_wg_udp_pin_ml = ml;
                         ESP_LOGI(TAG, "WG UDP pinned to upstream %c%c%d",
                                  uplink->name[0], uplink->name[1], uplink->num);
                     }
@@ -274,10 +286,11 @@ static void route_supervisor_task(void *arg)
                 }
                 s_pre_exit_default = NULL;
             }
-            if (s_wg_udp_pinned) {
+            if (s_wg_udp_pin != NULL) {
                 microlink_t *ml = tailscale_get_microlink();
                 if (ml) microlink_pin_wg_output_netif(ml, NULL);
-                s_wg_udp_pinned = false;
+                s_wg_udp_pin = NULL;
+                s_wg_udp_pin_ml = NULL;
                 ESP_LOGI(TAG, "WG UDP unpinned (exit node off)");
             }
             keepalive_stop();

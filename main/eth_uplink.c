@@ -101,6 +101,8 @@ static void on_eth_lost_ip(void *arg, esp_event_base_t base,
     s_ip = s_netmask = s_gw = 0;
 }
 
+#ifdef CONFIG_ETH_W5500_ENABLED
+
 /* ---- W5500 SPI transport without per-transfer allocations ---------------
  *
  * The stock W5500 SPI functions hand the caller's buffer straight to
@@ -437,6 +439,18 @@ esp_netif_t *eth_uplink_init(void)
     s_eth_handle = eth_handle;
     return netif;
 }
+
+#else  /* !CONFIG_ETH_W5500_ENABLED */
+
+/* Built without the W5500 driver: no Ethernet netif, so main.c registers no
+ * ETH handlers and the accessors below report a permanently absent uplink. */
+esp_netif_t *eth_uplink_init(void)
+{
+    ESP_LOGI(TAG, "W5500 support not built in (CONFIG_ETH_W5500_ENABLED=n)");
+    return NULL;
+}
+
+#endif /* CONFIG_ETH_W5500_ENABLED */
 
 void eth_uplink_set_enabled(uint8_t enable)
 {
