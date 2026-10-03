@@ -6,6 +6,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.29+W5500] - 2026-10-03
+
+### Released
+- Promotes the device-tested beta3 source to the final upstream v0.1.29 plus Xiao W5500 release.
+- The route-supervisor lifecycle and active-uplink DNS fixes remain scheduled for v0.1.30-beta1+W5500.
+
 ## [0.1.29-beta3+W5500] - 2026-10-03
 
 ### Release candidate
