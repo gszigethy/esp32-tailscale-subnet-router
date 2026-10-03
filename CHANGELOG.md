@@ -6,6 +6,15 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.29-beta2+W5500] - 2026-10-03
+
+### Fixed
+- The route supervisor holds a Tailscale lifecycle lease while using the instance and WireGuard interface. Reconnects invalidate cached pinning by generation, and queued pin updates finish before the lease is released. Accepted routes are published as one snapshot.
+- AP DHCP DNS follows the active leased uplink, preferring Ethernet when available and switching to WiFi after Ethernet loss. WiFi DHCP renewals no longer override Ethernet DNS. Relay, custom DNS and public fallback retain their priority.
+
+### Validation
+- The user confirmed successful device installation of beta1. Beta2 requires its own reconnect and failover testing.
+
 ## [0.1.29] — 2026-10-02
 
 Four small hardening fixes, two of them contributed by @gszigethy (#12, #13). Device-tested before tagging on the WiFi-only reference router: manual OTA; the favicon served without a session and every one of the 48 web endpoints registered; the same 20 route lookups before and after with the exit node off and with exit node plus LAN bypass on; an AP client reaching the gateway, the uplink LAN, a tailnet peer and the internet in both modes; SNMP on and off; six peers direct. The CGNAT-uplink case itself could not be reproduced on the bench (no such uplink here), so that fix rests on the code and on unchanged behaviour on an ordinary uplink.
