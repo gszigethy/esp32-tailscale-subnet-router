@@ -23,6 +23,8 @@
  */
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
+#include "freertos/semphr.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/netif.h"
 #include "lwip/pbuf.h"
@@ -219,12 +221,54 @@ static void set_default_via_tcpip(struct netif *target)
     UNLOCK_TCPIP_CORE();
 }
 
+/* The library queues its PCB update rather than waiting for execution.
+ * Queue a completion behind it and keep the lifecycle lease until both have
+ * run. tcpip_callback_wait is not a queue barrier with core locking enabled. */
+static void pin_complete_cb(void *ctx)
+{
+    xSemaphoreGive((SemaphoreHandle_t)ctx);
+}
+
+static esp_err_t pin_wg_output_sync(microlink_t *ml, struct netif *uplink,
+                                    SemaphoreHandle_t done)
+{
+    esp_err_t err = microlink_pin_wg_output_netif(ml, uplink);
+    if (err != ESP_OK) return err;
+    /* Retry enqueue failure while retaining the lease: returning early
+     * would permit teardown before the already-queued pin callback runs. */
+    while (tcpip_callback(pin_complete_cb, done) != ERR_OK) {
+        vTaskDelay(1);
+    }
+    xSemaphoreTake(done, portMAX_DELAY);
+    return ESP_OK;
+}
+
 static void route_supervisor_task(void *arg)
 {
     (void)arg;
+    SemaphoreHandle_t pin_done = xSemaphoreCreateBinary();
+    if (!pin_done) {
+        ESP_LOGE(TAG, "supervisor completion semaphore allocation failed");
+        vTaskDeleteWithCaps(NULL);
+        return;
+    }
     ESP_LOGI(TAG, "supervisor task started (exit_node=%lu)",
              (unsigned long)tailscale_exit_node_ip);
     while (1) {
+        if (!tailscale_lifecycle_try_acquire()) {
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            continue;
+        }
+        static uint32_t seen_generation = 0;
+        uint32_t generation = tailscale_lifecycle_generation();
+        if (generation != seen_generation) {
+            s_wg_udp_pin = NULL;
+            s_wg_udp_pin_ml = NULL;
+            seen_generation = generation;
+        }
+        /* Lifecycle lease prevents WG removal/free; the core lock protects
+         * list traversal against concurrent netif additions and updates. */
+        LOCK_TCPIP_CORE();
         struct netif *wg = find_wg_netif();
         struct netif *uplink = find_uplink_netif();
         /* wireguardif only flips its netif to LINK_UP after at least one
@@ -232,12 +276,13 @@ static void route_supervisor_task(void *arg)
          * we are trying to bootstrap for the exit node. Treat the netif
          * as usable as soon as it has its IP and is administratively up. */
         bool wg_ready = wg && netif_is_up(wg);
+        UNLOCK_TCPIP_CORE();
 
         if (tailscale_exit_node_ip != 0) {
             if (wg_ready && uplink != NULL) {
                 microlink_t *ml = tailscale_get_microlink();
                 if (s_wg_udp_pin != uplink || s_wg_udp_pin_ml != ml) {
-                    esp_err_t pr = ml ? microlink_pin_wg_output_netif(ml, uplink) : ESP_ERR_INVALID_STATE;
+                    esp_err_t pr = ml ? pin_wg_output_sync(ml, uplink, pin_done) : ESP_ERR_INVALID_STATE;
                     if (pr == ESP_OK) {
                         s_wg_udp_pin = uplink;
                         s_wg_udp_pin_ml = ml;
@@ -288,7 +333,7 @@ static void route_supervisor_task(void *arg)
             }
             if (s_wg_udp_pin != NULL) {
                 microlink_t *ml = tailscale_get_microlink();
-                if (ml) microlink_pin_wg_output_netif(ml, NULL);
+                if (ml) pin_wg_output_sync(ml, NULL, pin_done);
                 s_wg_udp_pin = NULL;
                 s_wg_udp_pin_ml = NULL;
                 ESP_LOGI(TAG, "WG UDP unpinned (exit node off)");
@@ -300,27 +345,33 @@ static void route_supervisor_task(void *arg)
          * When tailscale_accept_routes=1 the route hook redirects any
          * destination matching one of these CIDRs into the WG tunnel — the
          * way `tailscale up --accept-routes` does on the official client. */
+        tailscale_accepted_route_t new_routes[TAILSCALE_ACCEPTED_ROUTES_MAX];
+        int new_count = 0;
         if (tailscale_accept_routes) {
             microlink_t *ml = tailscale_get_microlink();
             int peer_n = ml ? microlink_get_peer_count(ml) : 0;
-            int new_count = 0;
             for (int i = 0; i < peer_n &&
                  new_count < TAILSCALE_ACCEPTED_ROUTES_MAX; i++) {
                 microlink_peer_info_t pi;
                 if (microlink_get_peer_info(ml, i, &pi) != ESP_OK) continue;
                 for (int r = 0; r < pi.subnet_route_count &&
                      new_count < TAILSCALE_ACCEPTED_ROUTES_MAX; r++) {
-                    tailscale_accepted_routes[new_count].network =
+                    new_routes[new_count].network =
                         pi.subnet_routes[r].network;
-                    tailscale_accepted_routes[new_count].prefix_len =
+                    new_routes[new_count].prefix_len =
                         pi.subnet_routes[r].prefix_len;
                     new_count++;
                 }
             }
-            tailscale_accepted_routes_count = new_count;
-        } else if (tailscale_accepted_routes_count != 0) {
-            tailscale_accepted_routes_count = 0;
         }
+        /* Publish as one snapshot: packet routing runs under the same core
+         * lock and must not observe entries from two different passes. */
+        LOCK_TCPIP_CORE();
+        memcpy(tailscale_accepted_routes, new_routes,
+               (size_t)new_count * sizeof new_routes[0]);
+        tailscale_accepted_routes_count = new_count;
+        UNLOCK_TCPIP_CORE();
+        tailscale_lifecycle_release();
 
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
