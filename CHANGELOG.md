@@ -6,6 +6,17 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.30-beta1+W5500] - 2026-10-03
+
+### Fixed
+- Integrates fork PR #7: protects route-supervisor access during Tailscale teardown and synchronizes lwIP callbacks in either core-locking mode.
+- Integrates fork PR #8: follows the active leased uplink for AP, relay, and firmware DNS without clearing AP DHCP leases or changing exit-node routes.
+- Enables per-interface DNS storage to retain each uplink's resolver addresses.
+
+### Basis
+- Builds on the stable v0.1.29+W5500 source. The 0.1.30 version identifies this fork's development release; its upstream base remains v0.1.29.
+- Both fixes were previously device-tested together in v0.1.29-beta2+W5500; this newly versioned firmware awaits device confirmation.
+
 ## [0.1.29+W5500] - 2026-10-03
 
 ### Released
