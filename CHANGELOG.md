@@ -6,6 +6,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.29-beta3+W5500] - 2026-10-03
+
+### Release candidate
+- Reissues the upstream `v0.1.29` plus Xiao W5500 delta as the candidate for the final `v0.1.29+W5500` release.
+- Excludes the route-supervisor lifecycle and active-uplink DNS fixes tested in beta2. Those changes are deferred together to the `v0.1.30-beta1+W5500` development line.
+- Requires device confirmation before promotion to the final release.
+
 ## [0.1.29] — 2026-10-02
 
 Four small hardening fixes, two of them contributed by @gszigethy (#12, #13). Device-tested before tagging on the WiFi-only reference router: manual OTA; the favicon served without a session and every one of the 48 web endpoints registered; the same 20 route lookups before and after with the exit node off and with exit node plus LAN bypass on; an AP client reaching the gateway, the uplink LAN, a tailnet peer and the internet in both modes; SNMP on and off; six peers direct. The CGNAT-uplink case itself could not be reproduced on the bench (no such uplink here), so that fix rests on the code and on unchanged behaviour on an ordinary uplink.
