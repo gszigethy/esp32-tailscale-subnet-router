@@ -28,6 +28,8 @@
 #include "nvs_flash.h"
 #include "lwip/inet.h"
 #include "lwip/netdb.h"
+#include "lwip/dns.h"
+#include "lwip/tcpip.h"
 #include "lwip/sockets.h"
 #if IP_NAPT
 #include "lwip/lwip_napt.h"
@@ -216,6 +218,17 @@ static void dns_relay_state_cb(bool healthy)
     ap_dns_poll(NULL);
 }
 
+static void uplink_resolvers_cb(void *ctx)
+{
+    const esp_netif_dns_info_t *resolvers = ctx;
+    for (int i = 0; i < 2; ++i) {
+        ip_addr_t addr;
+        IP_SET_TYPE_VAL(addr, IPADDR_TYPE_V4);
+        ip4_addr_set_u32(ip_2_ip4(&addr), resolvers[i].ip.u_addr.ip4.addr);
+        dns_setserver(i, &addr);
+    }
+}
+
 /* Match the physical uplink policy: leased Ethernet takes precedence over
  * leased STA. Use the application's state, updated before this call, rather
  * than the Ethernet status cache, whose event handler runs separately.
@@ -235,6 +248,23 @@ static void ap_refresh_uplink_dns(void)
 #endif
     if (!uplink && sta_connect)
         uplink = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    /* DHCP startup can clear lwIP's global resolver slots even for a standby
+     * interface. Per-netif storage also changes on DNS-only renewals. Keep
+     * firmware resolution aligned without reasserting the default route
+     * (which could undo exit-node routing), independently of AP overrides. */
+    esp_netif_dns_info_t resolvers[2] = {0};
+    if (uplink) {
+        esp_netif_get_dns_info(uplink, ESP_NETIF_DNS_MAIN, &resolvers[0]);
+        esp_netif_get_dns_info(uplink, ESP_NETIF_DNS_BACKUP, &resolvers[1]);
+    }
+    if (!resolvers[0].ip.u_addr.ip4.addr) {
+        ip4_addr_t fallback;
+        ip4addr_aton("1.1.1.1", &fallback);
+        resolvers[0].ip.u_addr.ip4.addr = fallback.addr;
+    }
+    if (tcpip_callback_wait(uplink_resolvers_cb, resolvers) != ERR_OK) {
+        ESP_LOGW(TAG_AP, "could not refresh firmware uplink DNS");
+    }
     if (ap) softap_set_dns_addr(ap, uplink);
 }
 
@@ -872,7 +902,6 @@ void softap_set_dns_addr(esp_netif_t *esp_netif_ap,esp_netif_t *esp_netif_sta)
             dns.ip.type = ESP_IPADDR_TYPE_V4;
             dns.ip.u_addr.ip4.addr = ap_ip.ip.addr;
             used_override = true;
-            ESP_LOGI(TAG_AP, "DNS relay ON — DHCP advertises AP IP as resolver");
         }
     }
     if (!used_override) {
