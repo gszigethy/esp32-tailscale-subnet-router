@@ -30,7 +30,7 @@ jobs:
         run: echo "SIZE_DIR=$RUNNER_TEMP/firmware-size" >> "$GITHUB_ENV"
 
       - name: Cache PlatformIO
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cache/pip
@@ -63,8 +63,20 @@ jobs:
           pio run -e esp32-s3 | tee "$SIZE_DIR/head-size.txt"
           stat -c '%s' .pio/build/esp32-s3/firmware.bin > "$SIZE_DIR/head-bytes.txt"
 
+      - name: Verify firmware image
+        run: |
+          test -s .pio/build/esp32-s3/firmware.bin
+          python - <<'PY'
+          from pathlib import Path
+          size = Path(".pio/build/esp32-s3/firmware.bin").stat().st_size
+          limit = 1966080
+          print(f"firmware.bin: {size} bytes ({size / limit:.1%} of app partition)")
+          if size >= limit:
+              raise SystemExit("firmware image exceeds app partition")
+          PY
+
       - name: Static analysis (Cppcheck)
-        run: pio check -e esp32-s3 --skip-packages --fail-on-defect=high
+        run: pio check -e esp32-s3 --skip-packages --fail-on-defect=medium
 
       - name: Check formatting on changed C/C++ lines
         if: github.event_name == 'pull_request'
