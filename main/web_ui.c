@@ -2,46 +2,46 @@
  *
  * SPDX-License-Identifier: MIT
  */
-#include <stddef.h>
-#include <stdio.h>
-#include <string.h>
-#include "esp_http_server.h"
-#include "esp_log.h"
-#include "esp_wifi.h"
-#include "esp_netif.h"
-#include "esp_timer.h"
-#include "esp_system.h"
-#include "esp_heap_caps.h"
-#include "esp_app_desc.h"
-#include "esp_http_client.h"
-#include "esp_crt_bundle.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "cJSON.h"
-#include "lwip/ip4_addr.h"
 #include "web_ui.h"
-#include "peer_dns.h"
-#include "eth_uplink.h"
-#include "tailscale_config.h"
-#include "tailscale_mtu.h"
-#include "nvs_params.h"
-#include "microlink.h"
-#include "dns_relay.h"
-#include "snmp_agent.h"
-#include "lwip_route_hook.h"
 #include "acl.h"
-#include "sdlog.h"
-#include "net_diag.h"
-#include "wifi_networks.h"
+#include "cJSON.h"
 #include "dhcp_reservations.h"
 #include "dhcps_ext.h"
-#include "portmap.h"
+#include "dns_relay.h"
+#include "esp_app_desc.h"
+#include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
+#include "esp_http_client.h"
+#include "esp_http_server.h"
+#include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_system.h"
+#include "esp_timer.h"
+#include "esp_wifi.h"
+#include "eth_uplink.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "lwip/ip4_addr.h"
+#include "lwip_route_hook.h"
 #include "mac_deny.h"
-#include "reset_history.h"
+#include "microlink.h"
+#include "net_diag.h"
+#include "nvs_params.h"
 #include "ota.h"
-#include <stdlib.h>
-#include <time.h>
+#include "peer_dns.h"
+#include "portmap.h"
+#include "reset_history.h"
+#include "sdlog.h"
+#include "snmp_agent.h"
+#include "tailscale_config.h"
+#include "tailscale_mtu.h"
+#include "wifi_networks.h"
 #include <ctype.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
 
 /* Cap on log payloads we surface over /api endpoints — both the live
  * log tail and the pre-crash snapshot share this ceiling so the JSON
@@ -2710,8 +2710,8 @@ static esp_err_t tailscale_handler(httpd_req_t *req)
         int32_t saved_adv_exit = tailscale_advertise_exit_node;
         (void)nvs_param_get_int("ts_adv_exit", &saved_adv_exit);
         cJSON_AddBoolToObject(settings, "advertise_exit_node", saved_adv_exit != 0);
-        cJSON_AddBoolToObject(settings, "exit_server_active",  tailscale_exit_server_active());
-        cJSON_AddNumberToObject(settings, "peerapi_port",      TAILSCALE_PEERAPI_PORT);
+        cJSON_AddBoolToObject(settings, "exit_server_active", tailscale_exit_server_active());
+        cJSON_AddNumberToObject(settings, "peerapi_port", TAILSCALE_PEERAPI_PORT);
     }
     {
         const char *eff = tailscale_compose_routes();
@@ -2918,10 +2918,12 @@ static esp_err_t tailscale_save_handler(httpd_req_t *req)
             int32_t adv = 0, exit_hbo = 0;
             (void)nvs_param_get_int("ts_adv_exit", &adv);
             (void)nvs_param_get_int("ts_exit_node", &exit_hbo);
-            const cJSON *adv_j  = cJSON_GetObjectItem(s, "advertise_exit_node");
+            const cJSON *adv_j = cJSON_GetObjectItem(s, "advertise_exit_node");
             const cJSON *exit_j = cJSON_GetObjectItem(s, "exit_node_ip");
-            if (cJSON_IsBool(adv_j)) adv = cJSON_IsTrue(adv_j) ? 1 : 0;
-            if (cJSON_IsString(exit_j)) exit_hbo = exit_j->valuestring[0] ? 1 : 0;
+            if (cJSON_IsBool(adv_j))
+                adv = cJSON_IsTrue(adv_j) ? 1 : 0;
+            if (cJSON_IsString(exit_j))
+                exit_hbo = exit_j->valuestring[0] ? 1 : 0;
             if (adv && exit_hbo) {
                 cJSON_Delete(root);
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
@@ -2986,13 +2988,13 @@ static esp_err_t tailscale_save_handler(httpd_req_t *req)
         save_int_if_present(s, "netcheck_threshold_ms", "ts_nc_thr");
 
         const cJSON *bool_keys[][2] = {
-            { cJSON_GetObjectItem(s, "netcheck_override"), (void *)"ts_nc_ovr"  },
-            { cJSON_GetObjectItem(s, "lan_bypass"),        (void *)"ts_lan_bp"  },
-            { cJSON_GetObjectItem(s, "accept_routes"),     (void *)"ts_acpt_rt" },
-            { cJSON_GetObjectItem(s, "snat_subnet_routes"), (void *)"ts_snat_sr" },
-            { cJSON_GetObjectItem(s, "advertise_ap"),      (void *)"ts_adv_ap"  },
+            {cJSON_GetObjectItem(s, "netcheck_override"), (void *)"ts_nc_ovr"},
+            {cJSON_GetObjectItem(s, "lan_bypass"), (void *)"ts_lan_bp"},
+            {cJSON_GetObjectItem(s, "accept_routes"), (void *)"ts_acpt_rt"},
+            {cJSON_GetObjectItem(s, "snat_subnet_routes"), (void *)"ts_snat_sr"},
+            {cJSON_GetObjectItem(s, "advertise_ap"), (void *)"ts_adv_ap"},
             /* persisted only: read at init, applies after the restart */
-            { cJSON_GetObjectItem(s, "advertise_exit_node"), (void *)"ts_adv_exit" },
+            {cJSON_GetObjectItem(s, "advertise_exit_node"), (void *)"ts_adv_exit"},
         };
         for (size_t i = 0; i < sizeof bool_keys / sizeof bool_keys[0]; i++) {
             const cJSON *v = bool_keys[i][0];
@@ -5110,7 +5112,7 @@ void web_ui_init(void)
      * instead of WebCrypto's ~100 ms. */
     httpd_config_t conf           = HTTPD_DEFAULT_CONFIG();
     conf.uri_match_fn             = httpd_uri_match_wildcard;
-    conf.max_uri_handlers         = 72;   /* 63 registered; reg_uri() logs if this runs out */
+    conf.max_uri_handlers = 72; /* 63 registered; reg_uri() logs if this runs out */
     conf.stack_size               = 12288;
     /* Without the mbedTLS context cost we can afford the bigger pool
      * the pre-HTTPS web server used. The SPA's first-paint opens 5-7

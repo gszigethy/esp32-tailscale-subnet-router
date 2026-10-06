@@ -21,24 +21,24 @@
  *
  * SPDX-License-Identifier: MIT
  */
-#include <stdbool.h>
-#include <stdint.h>
-#include <string.h>
+#include "esp_heap_caps.h" /* MALLOC_CAP_SPIRAM */
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h" /* xTaskCreateWithCaps — PSRAM stack */
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+#include "lwip/dhcp.h"
+#include "lwip/dns.h"
+#include "lwip/err.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/netif.h"
 #include "lwip/pbuf.h"
 #include "lwip/prot/ip4.h"
-#include "lwip/err.h"
 #include "lwip/tcpip.h"
-#include "lwip/dns.h"
-#include "lwip/dhcp.h"
-#include "esp_log.h"
-#include "esp_timer.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
-#include "freertos/task.h"
-#include "freertos/idf_additions.h"   /* xTaskCreateWithCaps — PSRAM stack */
-#include "esp_heap_caps.h"            /* MALLOC_CAP_SPIRAM */
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
 
 #include "lwip_route_hook.h"
 #include "microlink.h"
@@ -154,41 +154,48 @@ static struct netif *find_uplink_netif(void)
  *
  * Returns NULL when the tunnel rule should apply. *why gets a short reason
  * for route_explain(). Runs in the TCP/IP thread from the hook. */
-static struct netif *cgnat_local_exception(uint32_t dst_hbo, const char **why)
-{
+static struct netif *cgnat_local_exception(uint32_t dst_hbo, const char **why) {
     extern struct netif *netif_list;
     ip4_addr_t dst;
     dst.addr = lwip_htonl(dst_hbo);
 
-    if (microlink_wg_has_peer_ip(find_wg_netif(), dst.addr)) return NULL;
+    if (microlink_wg_has_peer_ip(find_wg_netif(), dst.addr))
+        return NULL;
 
     for (struct netif *n = netif_list; n; n = n->next) {
-        if (netif_is_wg(n)) continue;
-        if (!netif_is_up(n) || !netif_is_link_up(n)) continue;
+        if (netif_is_wg(n))
+            continue;
+        if (!netif_is_up(n) || !netif_is_link_up(n))
+            continue;
         const ip4_addr_t *addr = netif_ip4_addr(n);
         const ip4_addr_t *mask = netif_ip4_netmask(n);
-        if (addr == NULL || mask == NULL) continue;
-        if (ip4_addr_isany_val(*addr) || ip4_addr_isany_val(*mask)) continue;
+        if (addr == NULL || mask == NULL)
+            continue;
+        if (ip4_addr_isany_val(*addr) || ip4_addr_isany_val(*mask))
+            continue;
         if (ip4_addr_netcmp(&dst, addr, mask)) {
-            if (why) *why = "on-link on this interface, not a tailnet peer";
+            if (why)
+                *why = "on-link on this interface, not a tailnet peer";
             return n;
         }
     }
 
     struct netif *uplink = find_uplink_netif();
-    if (uplink == NULL) return NULL;
+    if (uplink == NULL)
+        return NULL;
     for (u8_t i = 0; i < DNS_MAX_SERVERS; i++) {
         const ip_addr_t *srv = dns_getserver(i);
-        if (srv && IP_IS_V4(srv) && !ip_addr_isany(srv) &&
-            ip4_addr_get_u32(ip_2_ip4(srv)) == dst.addr) {
-            if (why) *why = "uplink DNS resolver, not a tailnet peer";
+        if (srv && IP_IS_V4(srv) && !ip_addr_isany(srv) && ip4_addr_get_u32(ip_2_ip4(srv)) == dst.addr) {
+            if (why)
+                *why = "uplink DNS resolver, not a tailnet peer";
             return uplink;
         }
     }
     struct dhcp *dhcp = netif_dhcp_data(uplink);
     if (dhcp && !ip_addr_isany_val(dhcp->server_ip_addr) && IP_IS_V4(&dhcp->server_ip_addr) &&
         ip4_addr_get_u32(ip_2_ip4(&dhcp->server_ip_addr)) == dst.addr) {
-        if (why) *why = "uplink DHCP server, not a tailnet peer";
+        if (why)
+            *why = "uplink DHCP server, not a tailnet peer";
         return uplink;
     }
     return NULL;
@@ -273,15 +280,9 @@ static void keepalive_start(uint32_t target_ip_hbo)
     }
 }
 
-static void set_default_cb(void *ctx)
-{
-    netif_set_default(ctx);
-}
+static void set_default_cb(void *ctx) { netif_set_default(ctx); }
 
-static void set_default_via_tcpip(struct netif *target)
-{
-    tcpip_callback_wait(set_default_cb, target);
-}
+static void set_default_via_tcpip(struct netif *target) { tcpip_callback_wait(set_default_cb, target); }
 
 typedef struct {
     struct netif *wg;
@@ -289,8 +290,7 @@ typedef struct {
     bool wg_ready;
 } supervisor_netifs_t;
 
-static void supervisor_netifs_cb(void *ctx)
-{
+static void supervisor_netifs_cb(void *ctx) {
     supervisor_netifs_t *state = ctx;
     state->wg = find_wg_netif();
     state->uplink = find_uplink_netif();
@@ -302,28 +302,22 @@ typedef struct {
     int count;
 } supervisor_routes_t;
 
-static void publish_routes_cb(void *ctx)
-{
+static void publish_routes_cb(void *ctx) {
     const supervisor_routes_t *state = ctx;
-    memcpy(tailscale_accepted_routes, state->routes,
-           (size_t)state->count * sizeof state->routes[0]);
+    memcpy(tailscale_accepted_routes, state->routes, (size_t)state->count * sizeof state->routes[0]);
     tailscale_accepted_routes_count = state->count;
 }
 
 /* The library queues its PCB update rather than waiting for execution.
  * Queue a completion behind it and keep the lifecycle lease until both have
  * run. tcpip_callback_wait is not a queue barrier with core locking enabled. */
-static void pin_complete_cb(void *ctx)
-{
-    xSemaphoreGive((SemaphoreHandle_t)ctx);
-}
+static void pin_complete_cb(void *ctx) { xSemaphoreGive((SemaphoreHandle_t)ctx); }
 
-static esp_err_t pin_wg_output_sync(microlink_t *ml, struct netif *uplink,
-                                    SemaphoreHandle_t done,
-                                    struct tcpip_callback_msg *completion)
-{
+static esp_err_t pin_wg_output_sync(microlink_t *ml, struct netif *uplink, SemaphoreHandle_t done,
+                                    struct tcpip_callback_msg *completion) {
     esp_err_t err = microlink_pin_wg_output_netif(ml, uplink);
-    if (err != ESP_OK) return err;
+    if (err != ESP_OK)
+        return err;
     /* Reuse a preallocated completion message: retry mailbox pressure while
      * retaining the lease, without needing another heap allocation. */
     while (tcpip_callbackmsg_trycallback(completion) != ERR_OK) {
@@ -337,10 +331,10 @@ static void route_supervisor_task(void *arg)
 {
     (void)arg;
     SemaphoreHandle_t pin_done = xSemaphoreCreateBinary();
-    struct tcpip_callback_msg *pin_completion = pin_done
-        ? tcpip_callbackmsg_new(pin_complete_cb, pin_done) : NULL;
+    struct tcpip_callback_msg *pin_completion = pin_done ? tcpip_callbackmsg_new(pin_complete_cb, pin_done) : NULL;
     if (!pin_completion) {
-        if (pin_done) vSemaphoreDelete(pin_done);
+        if (pin_done)
+            vSemaphoreDelete(pin_done);
         ESP_LOGE(TAG, "supervisor completion allocation failed");
         vTaskDeleteWithCaps(NULL);
         return;
@@ -383,8 +377,8 @@ static void route_supervisor_task(void *arg)
                 esp_err_t pr = ml ? pin_wg_output_sync(ml, uplink, pin_done, pin_completion) : ESP_ERR_INVALID_STATE;
                 if (pr == ESP_OK) {
                     if (s_wg_udp_pin != uplink || s_wg_udp_pin_ml != ml) {
-                        ESP_LOGI(TAG, "WG UDP pin requested on upstream %c%c%d",
-                                 uplink->name[0], uplink->name[1], uplink->num);
+                        ESP_LOGI(TAG, "WG UDP pin requested on upstream %c%c%d", uplink->name[0], uplink->name[1],
+                                 uplink->num);
                     }
                     s_wg_udp_pin = uplink;
                     s_wg_udp_pin_ml = ml;
@@ -432,7 +426,8 @@ static void route_supervisor_task(void *arg)
             }
             if (s_wg_udp_pin != NULL) {
                 microlink_t *ml = tailscale_get_microlink();
-                if (ml) pin_wg_output_sync(ml, NULL, pin_done, pin_completion);
+                if (ml)
+                    pin_wg_output_sync(ml, NULL, pin_done, pin_completion);
                 s_wg_udp_pin = NULL;
                 s_wg_udp_pin_ml = NULL;
                 ESP_LOGI(TAG, "WG UDP unpinned (exit node off)");
@@ -448,16 +443,12 @@ static void route_supervisor_task(void *arg)
         if (tailscale_accept_routes) {
             microlink_t *ml = tailscale_get_microlink();
             int peer_n = ml ? microlink_get_peer_count(ml) : 0;
-            for (int i = 0; i < peer_n &&
-                 new_routes.count < TAILSCALE_ACCEPTED_ROUTES_MAX; i++) {
+            for (int i = 0; i < peer_n && new_routes.count < TAILSCALE_ACCEPTED_ROUTES_MAX; i++) {
                 microlink_peer_info_t pi;
                 if (microlink_get_peer_info(ml, i, &pi) != ESP_OK) continue;
-                for (int r = 0; r < pi.subnet_route_count &&
-                     new_routes.count < TAILSCALE_ACCEPTED_ROUTES_MAX; r++) {
-                    new_routes.routes[new_routes.count].network =
-                        pi.subnet_routes[r].network;
-                    new_routes.routes[new_routes.count].prefix_len =
-                        pi.subnet_routes[r].prefix_len;
+                for (int r = 0; r < pi.subnet_route_count && new_routes.count < TAILSCALE_ACCEPTED_ROUTES_MAX; r++) {
+                    new_routes.routes[new_routes.count].network = pi.subnet_routes[r].network;
+                    new_routes.routes[new_routes.count].prefix_len = pi.subnet_routes[r].prefix_len;
                     new_routes.count++;
                 }
             }
@@ -554,7 +545,8 @@ struct netif *__wrap_ip4_route_src_hook(const ip4_addr_t *src,
      * (see cgnat_local_exception). */
     if (ip_in_cgnat(dst_hbo)) {
         struct netif *local = cgnat_local_exception(dst_hbo, NULL);
-        if (local != NULL) return local;
+        if (local != NULL)
+            return local;
         if (should_log_route_hook()) {
             ESP_LOGW(TAG, "[ROUTE_HOOK] CGNAT src=%lu.%lu.%lu.%lu dst=%lu.%lu.%lu.%lu -> wg",
                      (src_hbo>>24)&0xFF, (src_hbo>>16)&0xFF, (src_hbo>>8)&0xFF, src_hbo&0xFF,
@@ -856,7 +848,8 @@ void route_explain(uint32_t src_hbo, uint32_t dst_hbo,
             const ip4_addr_t *addr = netif_ip4_addr(n);
             const ip4_addr_t *mask = netif_ip4_netmask(n);
             if (!addr || !mask || ip4_addr_isany_val(*addr)) continue;
-            if (!netif_is_up(n) || !netif_is_link_up(n)) continue;  /* mirrors the hook */
+            if (!netif_is_up(n) || !netif_is_link_up(n))
+                continue;                   /* mirrors the hook */
             if (netif_is_wg(n)) continue;   /* mirrors the hook */
             if ((dst.addr & mask->addr) == (addr->addr & mask->addr)) {
                 name_netif(n, out_netif, out_netif_size);
@@ -1038,10 +1031,8 @@ err_t __wrap_ip_napt_forward(struct pbuf *p, struct ip_hdr *iphdr,
          * on the STA side) reverses it automatically. Gated to inp==wg && outp==sta
          * so AP→tunnel / tunnel→AP / AP→WAN paths are untouched (no regression).
          * Runs in the single-threaded tcpip context, so the toggle is race-free. */
-        if ((tailscale_snat_subnet_routes || tailscale_exit_server_active()) &&
-            inp && outp && inp != outp &&
-            !ip_in_cgnat(dest_hbo) &&
-            inp == find_wg_netif() && netif_is_uplink(outp)) {
+        if ((tailscale_snat_subnet_routes || tailscale_exit_server_active()) && inp && outp && inp != outp &&
+            !ip_in_cgnat(dest_hbo) && inp == find_wg_netif() && netif_is_uplink(outp)) {
             uint8_t saved = inp->napt;
             inp->napt = 1;
             err_t r = __real_ip_napt_forward(p, iphdr, inp, outp);

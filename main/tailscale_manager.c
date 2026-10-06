@@ -100,20 +100,11 @@ static inline void life_unlock(void)
     if (s_life_mux) xSemaphoreGive(s_life_mux);
 }
 
-bool tailscale_lifecycle_try_acquire(void)
-{
-    return s_life_mux && xSemaphoreTake(s_life_mux, 0) == pdTRUE;
-}
+bool tailscale_lifecycle_try_acquire(void) { return s_life_mux && xSemaphoreTake(s_life_mux, 0) == pdTRUE; }
 
-void tailscale_lifecycle_release(void)
-{
-    life_unlock();
-}
+void tailscale_lifecycle_release(void) { life_unlock(); }
 
-uint32_t tailscale_lifecycle_generation(void)
-{
-    return s_life_generation;
-}
+uint32_t tailscale_lifecycle_generation(void) { return s_life_generation; }
 
 /* Start SNTP if it has not been started yet.  Called by tailscale_connect_task
  * (before the WireGuard handshake needs real wall-clock time) and by the WiFi
@@ -269,24 +260,24 @@ static bool ap_cidr_from_nvs(char *out, size_t out_size)
  * months). Advertising is harmless on its own: peers use the route only
  * after it is approved in the admin console. The AP CIDR follows the AP
  * settings, so changing the AP address needs no route edit any more. */
-bool tailscale_exit_server_active(void)
-{
-    return tailscale_enabled != 0 && tailscale_advertise_exit_node != 0 &&
-           tailscale_exit_node_ip == 0;
+bool tailscale_exit_server_active(void) {
+    return tailscale_enabled != 0 && tailscale_advertise_exit_node != 0 && tailscale_exit_node_ip == 0;
 }
 
 /* Append one route to the newline-separated list unless it is already there. */
-static size_t routes_append_unique(char *buf, size_t cap, size_t pos, const char *route)
-{
+static size_t routes_append_unique(char *buf, size_t cap, size_t pos, const char *route) {
     size_t len = strlen(route);
-    for (const char *p = buf; *p; ) {
+    for (const char *p = buf; *p;) {
         const char *eol = strchr(p, '\n');
         size_t l = eol ? (size_t)(eol - p) : strlen(p);
-        if (l == len && strncmp(p, route, len) == 0) return pos;
+        if (l == len && strncmp(p, route, len) == 0)
+            return pos;
         p = eol ? eol + 1 : p + l;
     }
-    if (len + 2 >= cap - pos) return pos;
-    if (pos > 0) buf[pos++] = '\n';
+    if (len + 2 >= cap - pos)
+        return pos;
+    if (pos > 0)
+        buf[pos++] = '\n';
     memcpy(buf + pos, route, len);
     pos += len;
     buf[pos] = '\0';
@@ -372,7 +363,7 @@ static esp_err_t tailscale_connect_locked(void)
         .ctrl_watchdog_ms = 0,
         .ctrl_host = (tailscale_login_server && tailscale_login_server[0]) ? tailscale_login_server : NULL,
         .ipn_version = ipn_version_effective(),
-        .advertise_routes = tailscale_compose_routes(),   /* W5500 fork: + ETH/STA auto-routes */
+        .advertise_routes = tailscale_compose_routes(), /* W5500 fork: + ETH/STA auto-routes */
         .peer_api_port = tailscale_exit_server_active() ? TAILSCALE_PEERAPI_PORT : 0,
         .netcheck_override_enabled = (tailscale_netcheck_override != 0),
         .netcheck_override_threshold_ms = (uint32_t)tailscale_netcheck_threshold_ms,
@@ -525,8 +516,7 @@ extern volatile int sta_connect;
 /* Append `cidr` as a new line unless it is empty or already listed. Returns
  * false when it does not fit, i.e. it was dropped. `buf` is a NUL-terminated,
  * newline-separated list. */
-static bool fork_routes_append_unique(char *buf, size_t buf_size, const char *cidr)
-{
+static bool fork_routes_append_unique(char *buf, size_t buf_size, const char *cidr) {
     if (!cidr || !cidr[0]) return true;
     size_t clen = strlen(cidr);
     for (const char *p = buf; *p; ) {
@@ -586,7 +576,8 @@ const char *tailscale_compose_routes(void)
         if (len > 0 && len < sizeof cidr) {
             memcpy(cidr, p, len);
             cidr[len] = '\0';
-            if (!fork_routes_append_unique(buf, sizeof buf, cidr)) dropped++;
+            if (!fork_routes_append_unique(buf, sizeof buf, cidr))
+                dropped++;
         } else if (len > 0) {
             dropped++;
         }
