@@ -66,18 +66,11 @@ jobs:
           fi
           echo "✅ No blocked files found"
 
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
-        with:
-          python-version: "3.13"
-
-      - name: Install scanner dependency
-        run: python -m pip install --only-binary :all: PyYAML==6.0.3
-
       - name: Scan content for secrets
         env:
           CHANGED_FILES: ${{ steps.changed.outputs.files }}
         run: |
+          pip install --quiet pyyaml || true
           python3 << 'PYTHON_SCRIPT'
           import yaml
           import re
