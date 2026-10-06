@@ -62,6 +62,42 @@ Up to **5** networks, tried in order. Per network:
 | **Accept peer subnet routes** | Install routes other nodes advertise. |
 | **LAN bypass when using an exit node** | RFC1918 destinations stay on the local LAN even with an exit node selected. |
 
+### Offering the router as an exit node
+
+Switch on **Offer this router as an exit node**, save and restart, then
+approve the exit node for the device in the Tailscale admin console and
+select it on a client. That one switch does three things:
+
+- advertises the default routes (`0.0.0.0/0` and `::/0`) next to the
+  subnet routes;
+- masquerades the clients' traffic behind the router's uplink address, so
+  replies find their way back;
+- advertises and runs the DNS service official Tailscale clients expect
+  from an exit node. Without it a client reaches addresses but cannot
+  resolve names.
+
+What to expect:
+
+- **IPv4 only.** `::/0` is announced because Tailscale wants the pair; IPv6
+  traffic from a client is not carried.
+- **About 1 Mbit/s** on a direct path (measured: 5 MB in 45 s), less when
+  the path is relayed. Fine for browsing and API calls, not for video.
+- It **cannot be combined with using an exit node** (the setting below):
+  the peers' traffic would go straight back into the tunnel. The save is
+  refused if both are set.
+- With a selected exit node the same combination is ignored at boot, the
+  exit node in use wins.
+
+The DNS service is a small HTTP server on its own port (41180; clients
+learn it from the node's Hostinfo). It runs only in this mode and answers
+only requests that arrive on the router's tailnet address from a known
+tailnet peer; anything from the AP or the uplink side gets `403`. Lookups
+are forwarded to the uplink resolver, over UDP, with TCP for truncated
+answers. `POST /dns-query` takes `application/dns-message`,
+`GET /dns-query?dns=` takes unpadded base64url; messages up to 4096 bytes.
+It does not interpret tailnet ACLs beyond that: a peer the control plane
+lets talk to the router may use it.
+
 ### Tunnel MTU
 
 `Auto` is recommended — 1280, the Tailscale tunnel MTU. Every peer's tun

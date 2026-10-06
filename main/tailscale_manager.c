@@ -41,6 +41,7 @@ char* tailscale_login_server = NULL;
 char* tailscale_ipn_version = NULL;
 char* tailscale_advertise_routes = NULL;
 int32_t tailscale_advertise_ap = 1;
+int32_t tailscale_advertise_exit_node = 0;
 int32_t tailscale_max_peers = 16;
 uint32_t tailscale_exit_node_ip = 0;
 int32_t tailscale_netcheck_override = 0;          /* default: OFF — netcheck mis-selects regions (garbage STUN RTTs: picked London #8 for a HU node, fra/nue sometimes missing because probes tunnel through the exit netif) which destabilises DERP. Stay on the configured/echoed home region until the netcheck STUN path is fixed. Runtime-overridable via NVS. */
@@ -84,6 +85,7 @@ static microlink_t *s_microlink = NULL;
  * to guarantee no change is missed; every surplus task was a 30 s SNTP
  * waiter holding 4 KB of stack. */
 static SemaphoreHandle_t s_life_mux = NULL;
+static uint32_t s_life_generation = 0;
 static portMUX_TYPE      s_queue_lock = portMUX_INITIALIZER_UNLOCKED;
 static int               s_connect_queued = 0;
 
@@ -97,6 +99,12 @@ static inline void life_unlock(void)
 {
     if (s_life_mux) xSemaphoreGive(s_life_mux);
 }
+
+bool tailscale_lifecycle_try_acquire(void) { return s_life_mux && xSemaphoreTake(s_life_mux, 0) == pdTRUE; }
+
+void tailscale_lifecycle_release(void) { life_unlock(); }
+
+uint32_t tailscale_lifecycle_generation(void) { return s_life_generation; }
 
 /* Start SNTP if it has not been started yet.  Called by tailscale_connect_task
  * (before the WireGuard handshake needs real wall-clock time) and by the WiFi
@@ -143,6 +151,9 @@ void tailscale_init(void)
             nvs_param_set_int("ts_adv_ap", tailscale_advertise_ap);
             ESP_LOGI(TAG, "migrated ap_route_en=%u to ts_adv_ap", (unsigned)legacy);
         }
+    }
+    if (nvs_param_get_int("ts_adv_exit", &v) == ESP_OK) {
+        tailscale_advertise_exit_node = v ? 1 : 0;
     }
     if (nvs_param_get_int("ts_maxpeers", &v) == ESP_OK && v >= 1 && v <= 64) {
         tailscale_max_peers = v;
@@ -249,6 +260,30 @@ static bool ap_cidr_from_nvs(char *out, size_t out_size)
  * months). Advertising is harmless on its own: peers use the route only
  * after it is approved in the admin console. The AP CIDR follows the AP
  * settings, so changing the AP address needs no route edit any more. */
+bool tailscale_exit_server_active(void) {
+    return tailscale_enabled != 0 && tailscale_advertise_exit_node != 0 && tailscale_exit_node_ip == 0;
+}
+
+/* Append one route to the newline-separated list unless it is already there. */
+static size_t routes_append_unique(char *buf, size_t cap, size_t pos, const char *route) {
+    size_t len = strlen(route);
+    for (const char *p = buf; *p;) {
+        const char *eol = strchr(p, '\n');
+        size_t l = eol ? (size_t)(eol - p) : strlen(p);
+        if (l == len && strncmp(p, route, len) == 0)
+            return pos;
+        p = eol ? eol + 1 : p + l;
+    }
+    if (len + 2 >= cap - pos)
+        return pos;
+    if (pos > 0)
+        buf[pos++] = '\n';
+    memcpy(buf + pos, route, len);
+    pos += len;
+    buf[pos] = '\0';
+    return pos;
+}
+
 const char *tailscale_advertise_routes_effective(void)
 {
     static char buf[640];
@@ -275,11 +310,21 @@ const char *tailscale_advertise_routes_effective(void)
         p = eol;
         while (*p == '\n' || *p == '\r') p++;
     }
+    /* An exit node is a node that advertises both default routes. The data
+     * plane here is IPv4 only; ::/0 is announced because the control plane
+     * wants the pair, and IPv6 traffic from a client is simply not carried. */
+    if (tailscale_exit_server_active()) {
+        pos = routes_append_unique(buf, sizeof buf, pos, "0.0.0.0/0");
+        pos = routes_append_unique(buf, sizeof buf, pos, "::/0");
+    }
     return buf[0] ? buf : NULL;
 }
 
 static esp_err_t tailscale_connect_locked(void)
 {
+    /* A generation, rather than an address, detects allocator reuse after
+     * reconnect. Readers hold the lifecycle mutex when inspecting it. */
+    ++s_life_generation;
     if (!tailscale_enabled) {
         ESP_LOGI(TAG, "Tailscale not enabled");
         return ESP_ERR_INVALID_STATE;
@@ -318,7 +363,8 @@ static esp_err_t tailscale_connect_locked(void)
         .ctrl_watchdog_ms = 0,
         .ctrl_host = (tailscale_login_server && tailscale_login_server[0]) ? tailscale_login_server : NULL,
         .ipn_version = ipn_version_effective(),
-        .advertise_routes = tailscale_compose_routes(),   /* W5500 fork: + ETH/STA auto-routes */
+        .advertise_routes = tailscale_compose_routes(), /* W5500 fork: + ETH/STA auto-routes */
+        .peer_api_port = tailscale_exit_server_active() ? TAILSCALE_PEERAPI_PORT : 0,
         .netcheck_override_enabled = (tailscale_netcheck_override != 0),
         .netcheck_override_threshold_ms = (uint32_t)tailscale_netcheck_threshold_ms,
         .preferred_derp_region = (uint16_t)tailscale_default_derp_region,
@@ -366,6 +412,7 @@ void tailscale_disconnect(void)
      * connect's teardown/re-init would double-free s_microlink. */
     life_lock();
     tailscale_connected = false;
+    ++s_life_generation;
     tailscale_tunnel_ip = 0;
     if (s_microlink) {
         sdlog_set_microlink(NULL);   /* detach recorder before freeing the instance */
@@ -469,8 +516,7 @@ extern volatile int sta_connect;
 /* Append `cidr` as a new line unless it is empty or already listed. Returns
  * false when it does not fit, i.e. it was dropped. `buf` is a NUL-terminated,
  * newline-separated list. */
-static bool routes_append_unique(char *buf, size_t buf_size, const char *cidr)
-{
+static bool fork_routes_append_unique(char *buf, size_t buf_size, const char *cidr) {
     if (!cidr || !cidr[0]) return true;
     size_t clen = strlen(cidr);
     for (const char *p = buf; *p; ) {
@@ -491,7 +537,7 @@ static bool routes_append_unique(char *buf, size_t buf_size, const char *cidr)
 static bool routes_append_cached(char *buf, size_t buf_size, const char *nvs_key)
 {
     char *cidr = nvs_param_get_str(nvs_key);
-    bool ok = routes_append_unique(buf, buf_size, cidr);
+    bool ok = fork_routes_append_unique(buf, buf_size, cidr);
     free(cidr);
     return ok;
 }
@@ -502,8 +548,9 @@ const char *tailscale_compose_routes(void)
      * 256-byte field (255 characters), so anything longer used to be cut
      * mid-CIDR while the UI preview listed it in full. Composing into the
      * same limit, whole entries only, makes the preview exactly what is
-     * advertised. The auto-routes go first so the zero-touch LAN routes win
-     * over a long manual list; whatever does not fit is dropped and logged.
+     * advertised. Exit-server defaults are reserved first so a long manual
+     * list cannot remove half of the required pair. The auto-routes go next
+     * so the zero-touch LAN routes win over a long manual list; whatever does not fit is dropped and logged.
      * Not reentrant, exactly like the upstream helper: the connect path is
      * serialized by s_life_mux, but a web UI preview landing in the same
      * instant shares the buffer for that one call. */
@@ -511,6 +558,10 @@ const char *tailscale_compose_routes(void)
     static int  s_last_dropped = 0;
     int dropped = 0;
     buf[0] = '\0';
+    if (tailscale_exit_server_active()) {
+        fork_routes_append_unique(buf, sizeof buf, "0.0.0.0/0");
+        fork_routes_append_unique(buf, sizeof buf, "::/0");
+    }
     if (eth_route_en && eth_connect &&
         !routes_append_cached(buf, sizeof buf, "eth_route_cidr")) dropped++;
     if (sta_route_en && sta_connect &&
@@ -525,7 +576,8 @@ const char *tailscale_compose_routes(void)
         if (len > 0 && len < sizeof cidr) {
             memcpy(cidr, p, len);
             cidr[len] = '\0';
-            if (!routes_append_unique(buf, sizeof buf, cidr)) dropped++;
+            if (!fork_routes_append_unique(buf, sizeof buf, cidr))
+                dropped++;
         } else if (len > 0) {
             dropped++;
         }

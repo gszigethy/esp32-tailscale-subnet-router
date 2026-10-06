@@ -2,45 +2,46 @@
  *
  * SPDX-License-Identifier: MIT
  */
-#include <stddef.h>
-#include <stdio.h>
-#include <string.h>
-#include "esp_http_server.h"
-#include "esp_log.h"
-#include "esp_wifi.h"
-#include "esp_netif.h"
-#include "esp_timer.h"
-#include "esp_system.h"
-#include "esp_heap_caps.h"
-#include "esp_app_desc.h"
-#include "esp_http_client.h"
-#include "esp_crt_bundle.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "cJSON.h"
-#include "lwip/ip4_addr.h"
 #include "web_ui.h"
-#include "eth_uplink.h"
-#include "tailscale_config.h"
-#include "tailscale_mtu.h"
-#include "nvs_params.h"
-#include "microlink.h"
-#include "dns_relay.h"
-#include "snmp_agent.h"
-#include "lwip_route_hook.h"
 #include "acl.h"
-#include "sdlog.h"
-#include "net_diag.h"
-#include "wifi_networks.h"
+#include "cJSON.h"
 #include "dhcp_reservations.h"
 #include "dhcps_ext.h"
-#include "portmap.h"
+#include "dns_relay.h"
+#include "esp_app_desc.h"
+#include "esp_crt_bundle.h"
+#include "esp_heap_caps.h"
+#include "esp_http_client.h"
+#include "esp_http_server.h"
+#include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_system.h"
+#include "esp_timer.h"
+#include "esp_wifi.h"
+#include "eth_uplink.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "lwip/ip4_addr.h"
+#include "lwip_route_hook.h"
 #include "mac_deny.h"
-#include "reset_history.h"
+#include "microlink.h"
+#include "net_diag.h"
+#include "nvs_params.h"
 #include "ota.h"
-#include <stdlib.h>
-#include <time.h>
+#include "peer_dns.h"
+#include "portmap.h"
+#include "reset_history.h"
+#include "sdlog.h"
+#include "snmp_agent.h"
+#include "tailscale_config.h"
+#include "tailscale_mtu.h"
+#include "wifi_networks.h"
 #include <ctype.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
 
 /* Cap on log payloads we surface over /api endpoints — both the live
  * log tail and the pre-crash snapshot share this ceiling so the JSON
@@ -2704,7 +2705,16 @@ static esp_err_t tailscale_handler(httpd_req_t *req)
     cJSON_AddBoolToObject  (settings, "snat_subnet_routes",      tailscale_snat_subnet_routes != 0);
     cJSON_AddBoolToObject  (settings, "advertise_ap",            tailscale_advertise_ap != 0);
     {
-        const char *eff = tailscale_compose_routes();   /* W5500 fork: + ETH/STA auto-routes */
+        /* The saved switch (it takes effect after a restart, like the exit
+         * node selection) and what this boot is actually doing. */
+        int32_t saved_adv_exit = tailscale_advertise_exit_node;
+        (void)nvs_param_get_int("ts_adv_exit", &saved_adv_exit);
+        cJSON_AddBoolToObject(settings, "advertise_exit_node", saved_adv_exit != 0);
+        cJSON_AddBoolToObject(settings, "exit_server_active", tailscale_exit_server_active());
+        cJSON_AddNumberToObject(settings, "peerapi_port", TAILSCALE_PEERAPI_PORT);
+    }
+    {
+        const char *eff = tailscale_compose_routes();
         cJSON_AddStringToObject(settings, "effective_routes", eff ? eff : "");
     }
     {
@@ -2900,6 +2910,27 @@ static esp_err_t tailscale_save_handler(httpd_req_t *req)
      * the credential. */
     const cJSON *s = cJSON_GetObjectItem(root, "settings");
     if (cJSON_IsObject(s)) {
+        /* Offering an exit node and using one at the same time would send the
+         * peers' traffic straight back into the tunnel. Work out what both
+         * settings would be after this save and refuse the combination before
+         * anything is written. */
+        {
+            int32_t adv = 0, exit_hbo = 0;
+            (void)nvs_param_get_int("ts_adv_exit", &adv);
+            (void)nvs_param_get_int("ts_exit_node", &exit_hbo);
+            const cJSON *adv_j = cJSON_GetObjectItem(s, "advertise_exit_node");
+            const cJSON *exit_j = cJSON_GetObjectItem(s, "exit_node_ip");
+            if (cJSON_IsBool(adv_j))
+                adv = cJSON_IsTrue(adv_j) ? 1 : 0;
+            if (cJSON_IsString(exit_j))
+                exit_hbo = exit_j->valuestring[0] ? 1 : 0;
+            if (adv && exit_hbo) {
+                cJSON_Delete(root);
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "cannot offer an exit node and use one at the same time");
+                return ESP_FAIL;
+            }
+        }
         const cJSON *enabled = cJSON_GetObjectItem(s, "enabled");
         if (cJSON_IsBool(enabled)) {
             nvs_save_int("ts_enabled", cJSON_IsTrue(enabled) ? 1 : 0);
@@ -2957,11 +2988,13 @@ static esp_err_t tailscale_save_handler(httpd_req_t *req)
         save_int_if_present(s, "netcheck_threshold_ms", "ts_nc_thr");
 
         const cJSON *bool_keys[][2] = {
-            { cJSON_GetObjectItem(s, "netcheck_override"), (void *)"ts_nc_ovr"  },
-            { cJSON_GetObjectItem(s, "lan_bypass"),        (void *)"ts_lan_bp"  },
-            { cJSON_GetObjectItem(s, "accept_routes"),     (void *)"ts_acpt_rt" },
-            { cJSON_GetObjectItem(s, "snat_subnet_routes"), (void *)"ts_snat_sr" },
-            { cJSON_GetObjectItem(s, "advertise_ap"),      (void *)"ts_adv_ap"  },
+            {cJSON_GetObjectItem(s, "netcheck_override"), (void *)"ts_nc_ovr"},
+            {cJSON_GetObjectItem(s, "lan_bypass"), (void *)"ts_lan_bp"},
+            {cJSON_GetObjectItem(s, "accept_routes"), (void *)"ts_acpt_rt"},
+            {cJSON_GetObjectItem(s, "snat_subnet_routes"), (void *)"ts_snat_sr"},
+            {cJSON_GetObjectItem(s, "advertise_ap"), (void *)"ts_adv_ap"},
+            /* persisted only: read at init, applies after the restart */
+            {cJSON_GetObjectItem(s, "advertise_exit_node"), (void *)"ts_adv_exit"},
         };
         for (size_t i = 0; i < sizeof bool_keys / sizeof bool_keys[0]; i++) {
             const cJSON *v = bool_keys[i][0];
@@ -5014,37 +5047,33 @@ static const httpd_uri_t uri_eth_uplink = {
     .uri = "/api/eth-uplink", .method = HTTP_POST, .handler = eth_uplink_handler,
 };
 
-/* GET /favicon.ico. The SPA declares an inline SVG icon (index.html), but
- * browsers and bookmark/PWA paths still probe this URL, and with no handler
- * each probe logged an "httpd_uri: URI ... not found" WARN plus a 404. Serve
- * the same icon (every current browser accepts SVG here) with a long cache
- * lifetime so it is asked for once. Deliberately unauthenticated, like "/":
- * it is a static decoration and the login overlay shows it before a session
- * exists. */
+/* The browser asks for /favicon.ico on every tab whatever the page declares,
+ * and with nothing registered each request was a 404 plus a "URI not found"
+ * WARN in the device log. The SPA carries the same icon inline (no request at
+ * all); this serves it to clients that probe the URL anyway. No auth: the
+ * login overlay needs it before a session exists. */
 static const char FAVICON_SVG[] =
-    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
-    "<rect width='32' height='32' rx='7' fill='#161a1f'/>"
-    "<path d='M16 6.5c-4.3 0-7.9 1.3-7.9 1.3v3.1S11.7 9.6 16 9.6s7.9 1.3 7.9 "
-    "1.3V7.8S20.3 6.5 16 6.5zM8.1 13.6v3.1S11.7 15.4 16 15.4s7.9 1.3 7.9 "
-    "1.3v-3.1S20.3 12.3 16 12.3s-7.9 1.3-7.9 1.3zm5.9 5.6v6.3h4v-6.3h-4z' "
-    "fill='#4ade80'/></svg>";
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='16'"
+    " fill='#0f172a'/><g fill='none' stroke='#60a5fa' stroke-width='1.8' stroke-linecap='round'"
+    "><path d='M9.5 9.5a9.5 9.5 0 0 1 13 0'/><path d='M12.2 12a5.6 5.6 0 0 1 7.6 0'/></g><rect "
+    "x='10.5' y='15' width='11' height='11' rx='2.2' fill='#1e293b' stroke='#3b82f6' stroke-wid"
+    "th='1.6'/><path d='M8 18.5h2.5M8 22.5h2.5M21.5 18.5H24M21.5 22.5H24M14 26v2M18 26v2' strok"
+    "e='#3b82f6' stroke-width='1.4' stroke-linecap='round'/><rect x='13.6' y='18.1' width='4.8'"
+    " height='4.8' rx='.8' fill='#3b82f6'/></svg>";
 
 static esp_err_t favicon_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "image/svg+xml");
-    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=604800, immutable");
+    httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=604800");
     return httpd_resp_send(req, FAVICON_SVG, sizeof FAVICON_SVG - 1);
 }
 static const httpd_uri_t uri_favicon = {
     .uri = "/favicon.ico", .method = HTTP_GET, .handler = favicon_handler,
 };
 
-/* Registration is fallible: esp_http_server refuses a handler once
- * max_uri_handlers is full and returns ESP_ERR_HTTPD_HANDLERS_FULL. Every
- * call site used to discard that, so the table filling up would silently
- * drop whichever endpoints were registered last -- those URLs would then 404
- * and the SPA would fail somewhere far from the cause. Log it loudly and name
- * the knob instead. */
+/* httpd_register_uri_handler() fails once max_uri_handlers is used up, and the
+ * endpoints registered last would then just 404 with nothing pointing at the
+ * cause. Log it, naming the knob. */
 static void reg_uri(httpd_handle_t srv, const httpd_uri_t *u)
 {
     esp_err_t err = httpd_register_uri_handler(srv, u);
@@ -5054,12 +5083,10 @@ static void reg_uri(httpd_handle_t srv, const httpd_uri_t *u)
     }
 }
 
-/* Start the HTTP server and register every endpoint.
- *
- * Note on matching: conf.uri_match_fn is httpd_uri_match_wildcard, but that
- * only widens patterns that themselves end in '*'. uri_index is the exact
- * path "/", so there is no catch-all and an unregistered path really does
- * 404 (which is why /favicon.ico needs its own handler above). */
+/* Wrapper with the URI-handler signature (no err code) so the same
+ * redirect can be both a wildcard URI handler AND a 404 fallback.
+ * Wildcard match avoids the "httpd_uri: URI ... not found" WARN
+ * spam the 404-only path used to emit. */
 void web_ui_init(void)
 {
     static httpd_handle_t server = NULL;
@@ -5085,11 +5112,7 @@ void web_ui_init(void)
      * instead of WebCrypto's ~100 ms. */
     httpd_config_t conf           = HTTPD_DEFAULT_CONFIG();
     conf.uri_match_fn             = httpd_uri_match_wildcard;
-    /* Headroom, deliberately. The limit used to equal the number of
-     * handlers registered below, leaving no room: the next endpoint added
-     * would fail to register (now logged by reg_uri, previously silent).
-     * Each unused slot costs one pointer. */
-    conf.max_uri_handlers         = 80;
+    conf.max_uri_handlers = 72; /* 63 registered; reg_uri() logs if this runs out */
     conf.stack_size               = 12288;
     /* Without the mbedTLS context cost we can afford the bigger pool
      * the pre-HTTPS web server used. The SPA's first-paint opens 5-7
@@ -5105,6 +5128,7 @@ void web_ui_init(void)
     }
     reg_uri(server, &uri_index);
     reg_uri(server, &uri_favicon);
+    peer_dns_start();
     reg_uri(server, &uri_status);
     reg_uri(server, &uri_network);
     reg_uri(server, &uri_network_save);

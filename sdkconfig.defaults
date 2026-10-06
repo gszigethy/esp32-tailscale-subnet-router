@@ -103,7 +103,10 @@ CONFIG_LWIP_L2_TO_L3_COPY=y
 # + WG + DERP + 2 httpd pools) blew past 16 and httpd logged
 # "httpd_accept_conn: error in accept (23)" — errno 23 = ENFILE. Up to 24.
 # Raised to 26: +1 for the SNMP agent UDP socket on port 161, +1 headroom.
-CONFIG_LWIP_MAX_SOCKETS=26
+# Raised to 31: the exit-node DNS service is a second, small HTTP server
+# (listener, control socket, three clients) and only runs in exit-node
+# server mode, but the table has to hold it.
+CONFIG_LWIP_MAX_SOCKETS=31
 # 2026-05-24 throughput-regression bisect: comparing the migration target
 # sdkconfig against the pre-migration OLD repo (which delivered the
 # expected 1 Mbps WG-tunnel throughput) showed the NEW config aggressively
@@ -280,6 +283,8 @@ CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
 CONFIG_COMPILER_OPTIMIZATION_PERF=y
 
 # --- OTA --------------------------------------------------------------------
+CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF=y
+
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # --- FreeRTOS extras for the 'tasks' CLI command ---------------------------

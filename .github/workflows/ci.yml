@@ -53,6 +53,9 @@ jobs:
       - name: Check whitespace
         run: git diff --check "${{ github.event.pull_request.base.sha || github.event.before || github.sha }}" HEAD
 
+      - name: Test W5500 exit-node integration on host
+        run: python tools/test_w5500_rebase.py
+
       - name: Build ESP32-S3 firmware
         shell: bash
         run: |

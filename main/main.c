@@ -11,23 +11,26 @@
    software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
    CONDITIONS OF ANY KIND, either express or implied.
 */
-#include <string.h>
-#include <stdlib.h>
-#include <time.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/event_groups.h"
-#include "esp_mac.h"
-#include "esp_wifi.h"
 #include "esp_eap_client.h"
 #include "esp_event.h"
 #include "esp_log.h"
-#include "esp_netif_net_stack.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
-#include "nvs_flash.h"
+#include "esp_netif_net_stack.h"
+#include "esp_timer.h"
+#include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "freertos/task.h"
+#include "lwip/dns.h"
 #include "lwip/inet.h"
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
+#include "lwip/tcpip.h"
+#include "nvs_flash.h"
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
 #if IP_NAPT
 #include "lwip/lwip_napt.h"
 
@@ -187,6 +190,16 @@ volatile uint8_t sta_uplink_en = 0;
 /* Non-static — also called from web_ui.c when DNS-relay state changes,
  * so the new DHCP-offered DNS takes effect immediately for new leases. */
 void softap_set_dns_addr(esp_netif_t *esp_netif_ap, esp_netif_t *esp_netif_sta);
+static void ap_refresh_uplink_dns(void);
+ESP_EVENT_DEFINE_BASE(AP_DNS_EVENT);
+
+static void ap_dns_refresh_event(void *arg, esp_event_base_t base, int32_t id, void *data) { ap_refresh_uplink_dns(); }
+
+static void ap_dns_poll(void *arg) {
+    /* The default event loop serializes DNS refresh with uplink events.
+     * Never block the timer/relay task; the next poll retries a full queue. */
+    esp_event_post(AP_DNS_EVENT, 0, NULL, 0, 0);
+}
 /* Used by both wifi_event_handler (STA got-IP) and eth_ip_event_handler. */
 static void cidr_from_dhcp_event(const ip_event_got_ip_t *ev, char *out, size_t out_size);
 
@@ -197,6 +210,24 @@ static void cidr_from_dhcp_event(const ip_event_got_ip_t *ev, char *out, size_t 
 static void dns_relay_state_cb(bool healthy)
 {
     (void)healthy;
+    ap_dns_poll(NULL);
+}
+
+static void uplink_resolvers_cb(void *ctx) {
+    const esp_netif_dns_info_t *resolvers = ctx;
+    for (int i = 0; i < 2; ++i) {
+        ip_addr_t addr;
+        IP_SET_TYPE_VAL(addr, IPADDR_TYPE_V4);
+        ip4_addr_set_u32(ip_2_ip4(&addr), resolvers[i].ip.u_addr.ip4.addr);
+        dns_setserver(i, &addr);
+    }
+}
+
+/* Match the physical uplink policy: leased Ethernet takes precedence over
+ * leased STA. Use the application's state, updated before this call, rather
+ * than the Ethernet status cache, whose event handler runs separately.
+ * A NULL source still applies relay/custom DNS or the public fallback. */
+static void ap_refresh_uplink_dns(void) {
     esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
     /* Use the active uplink for the DNS source, not a hardcoded STA lookup.
      * When ETH is the primary uplink and WiFi STA is not connected, looking
@@ -205,14 +236,30 @@ static void dns_relay_state_cb(bool healthy)
      * fallback, hiding the router's upstream resolver from AP clients. */
     esp_netif_t *uplink = NULL;
 #ifdef CONFIG_ETH_W5500_ENABLED
-    if (eth_uplink_connected())
+    if (eth_connect)
         uplink = esp_netif_get_handle_from_ifkey("ETH_DEF");
 #endif
-    if (!uplink)
+    if (!uplink && sta_connect)
         uplink = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    ESP_LOGI(TAG_AP, "DNS relay state changed → healthy=%d — reapplying softap DNS",
-             (int)healthy);
-    if (ap && uplink) softap_set_dns_addr(ap, uplink);
+    /* DHCP startup can clear lwIP's global resolver slots even for a standby
+     * interface. Per-netif storage also changes on DNS-only renewals. Keep
+     * firmware resolution aligned without reasserting the default route
+     * (which could undo exit-node routing), independently of AP overrides. */
+    esp_netif_dns_info_t resolvers[2] = {0};
+    if (uplink) {
+        esp_netif_get_dns_info(uplink, ESP_NETIF_DNS_MAIN, &resolvers[0]);
+        esp_netif_get_dns_info(uplink, ESP_NETIF_DNS_BACKUP, &resolvers[1]);
+    }
+    if (!resolvers[0].ip.u_addr.ip4.addr) {
+        ip4_addr_t fallback;
+        ip4addr_aton("1.1.1.1", &fallback);
+        resolvers[0].ip.u_addr.ip4.addr = fallback.addr;
+    }
+    if (tcpip_callback_wait(uplink_resolvers_cb, resolvers) != ERR_OK) {
+        ESP_LOGW(TAG_AP, "could not refresh firmware uplink DNS");
+    }
+    if (ap)
+        softap_set_dns_addr(ap, uplink);
 }
 
 /* Multi-network rotation state. Index 0 is preferred; on association
@@ -421,6 +468,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         bool sta_was_up = sta_connect;
         sta_connect = 0;
         uplink_state_changed();
+        if (sta_was_up)
+            ap_refresh_uplink_dns();
         /* With ETH carrying the tunnel, a lost STA only matters if its subnet
          * was advertised: reconnect so the stale route is withdrawn. (Fires
          * on every retry, hence only on the up -> down transition.) */
@@ -523,9 +572,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
          * clients can resolve names through us. Runs every time we
          * (re-)acquire an STA IP — DNS may have changed on the new
          * uplink, and DHCP server restart is idempotent. */
-        esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-        esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-        if (ap && sta) softap_set_dns_addr(ap, sta);
+        ap_refresh_uplink_dns();
 
         /* Re-bind the NAPT portmap entries to the freshly-acquired
          * STA IP. portmap_install_all is idempotent — duplicate bindings
@@ -567,6 +614,7 @@ static void eth_uplink_went_down(const char *why)
     eth_connect = 0;
     uplink_state_changed();
     default_route_to_sta();
+    ap_refresh_uplink_dns();
     tailscale_kick();
     portmap_install_all();   /* re-bind forwards to the remaining uplink */
 }
@@ -623,8 +671,7 @@ static void eth_ip_event_handler(void *arg, esp_event_base_t event_base,
         }
 
         /* Copy the upstream (Ethernet) DNS into the AP-side DHCP options. */
-        esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-        if (ap && eth) softap_set_dns_addr(ap, eth);
+        ap_refresh_uplink_dns();
 
         /* Re-bind any portmap entries to the freshly-acquired Ethernet IP. */
         portmap_install_all();
@@ -654,6 +701,11 @@ static void eth_link_event_handler(void *arg, esp_event_base_t event_base,
 esp_netif_t *wifi_init_softap(void)
 {
     esp_netif_t *esp_netif_ap = esp_netif_create_default_wifi_ap();
+    /* Configure the offer once, before AP startup. Runtime DNS updates use
+     * esp_netif_set_dns_info and preserve DHCP's lease table. */
+    uint8_t offer_dns = DHCPS_OFFER_DNS;
+    ESP_ERROR_CHECK(esp_netif_dhcps_option(esp_netif_ap, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &offer_dns,
+                                           sizeof offer_dns));
 
     /* Optional AP-side IP override. Empty NVS keys → keep the default
      * 192.168.4.1/24. When both are set and parse cleanly we stop the
@@ -845,7 +897,6 @@ void softap_set_dns_addr(esp_netif_t *esp_netif_ap,esp_netif_t *esp_netif_sta)
             dns.ip.type = ESP_IPADDR_TYPE_V4;
             dns.ip.u_addr.ip4.addr = ap_ip.ip.addr;
             used_override = true;
-            ESP_LOGI(TAG_AP, "DNS relay ON — DHCP advertises AP IP as resolver");
         }
     }
     if (!used_override) {
@@ -860,7 +911,7 @@ void softap_set_dns_addr(esp_netif_t *esp_netif_ap,esp_netif_t *esp_netif_sta)
         }
         free(ap_dns_str);
     }
-    if (!used_override) {
+    if (!used_override && esp_netif_sta) {
         esp_netif_get_dns_info(esp_netif_sta, ESP_NETIF_DNS_MAIN, &dns);
     }
     if (dns.ip.u_addr.ip4.addr == 0) {
@@ -870,11 +921,13 @@ void softap_set_dns_addr(esp_netif_t *esp_netif_ap,esp_netif_t *esp_netif_sta)
         dns.ip.u_addr.ip4.addr = a.addr;
     }
 
-    uint8_t dhcps_offer_option = DHCPS_OFFER_DNS;
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_dhcps_stop(esp_netif_ap));
-    ESP_ERROR_CHECK(esp_netif_dhcps_option(esp_netif_ap, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &dhcps_offer_option, sizeof(dhcps_offer_option)));
-    ESP_ERROR_CHECK(esp_netif_set_dns_info(esp_netif_ap, ESP_NETIF_DNS_MAIN, &dns));
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_dhcps_start(esp_netif_ap));
+    esp_netif_dns_info_t current = {0};
+    if (esp_netif_get_dns_info(esp_netif_ap, ESP_NETIF_DNS_MAIN, &current) == ESP_OK &&
+        current.ip.type == dns.ip.type && current.ip.u_addr.ip4.addr == dns.ip.u_addr.ip4.addr)
+        return;
+    /* ESP-IDF updates the server DNS in TCP/IP context without stopping it.
+     * A stop/start clears leases and can reissue an address still in use. */
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_set_dns_info(esp_netif_ap, ESP_NETIF_DNS_MAIN, &dns));
 
     if (used_override) {
         ESP_LOGI(TAG_AP, "AP DHCP-offered DNS = %u.%u.%u.%u (operator override)",
@@ -895,6 +948,7 @@ void app_main(void)
 {
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_ERROR_CHECK(esp_event_handler_register(AP_DNS_EVENT, ESP_EVENT_ANY_ID, ap_dns_refresh_event, NULL));
 
     //Initialize NVS
     esp_err_t ret = nvs_flash_init();
@@ -1090,6 +1144,8 @@ void app_main(void)
     /* Initialize AP */
     ESP_LOGI(TAG_AP, "ESP_WIFI_MODE_AP");
     esp_netif_t *esp_netif_ap = wifi_init_softap();
+    /* Apply custom/fallback DNS even when neither uplink ever acquires IP. */
+    ap_refresh_uplink_dns();
 
     /* Tell the DNS relay which IP to bind on (the freshly-configured
      * AP IP). The relay task watches this and (re-)binds on change. */
@@ -1106,6 +1162,16 @@ void app_main(void)
 
     /* Start WiFi */
     ESP_ERROR_CHECK(esp_wifi_start() );
+
+    /* DNS-only DHCP renewals do not emit got-IP. Refresh periodically so
+     * changes to a leased interface's resolver still reach AP DHCP. */
+    const esp_timer_create_args_t dns_poll_args = {
+        .callback = ap_dns_poll,
+        .name = "ap_dns_poll",
+    };
+    esp_timer_handle_t dns_poll_timer;
+    ESP_ERROR_CHECK(esp_timer_create(&dns_poll_args, &dns_poll_timer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(dns_poll_timer, 5000000));
 
     /* Optional TX-power override. NVS "tx_pwr" is a u8 in 0.25 dBm
      * steps (matches esp_wifi_set_max_tx_power): valid range is 8..84

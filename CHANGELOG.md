@@ -6,6 +6,74 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.31-beta1+W5500] - 2026-10-06
+
+### From upstream
+- Rebases the W5500 fork onto upstream v0.1.31, including exit-node hosting and DNS service, reconnect and CGNAT fixes, and the updated microlink submodule.
+- The route-supervisor lifecycle fix is now provided by upstream PR #14.
+
+### Fork changes
+- Adapts exit-node DNS to the active leased Ethernet/WiFi uplink.
+- Preserves the exit-node default-route pair within the route advertisement size limit.
+- Retains the W5500 driver, wired routing/failover, Ethernet UI, active-uplink DNS, and fork OTA ownership.
+- Consolidates maintenance onto main; published release history is retained.
+
+### Validation
+- Prerelease; device confirmation of OTA, wired uplink, tunnel, and exit-node hosting is required before stable promotion.
+
+## [0.1.31] — 2026-10-05
+
+A new mode and a memory fix. The router can now offer its own uplink as an exit node to tailnet devices, with the DNS service official Tailscale clients expect (#18; the DNS service and the microlink change behind it are by @5queezer). And traffic through an exit node no longer drains internal RAM. Device-tested before tagging on the WiFi-only reference router with an official client (Tailscale 1.102 on Linux) using it as exit node: the client selects the router, leaves through its uplink address, resolves names and loads sites by name; 5 MB in about 45 s (roughly 0.9 Mbit/s); 80 name lookups four at a time with the admin UI still answering within a fifth of a second; the DNS service refuses callers from the uplink side and its port is closed when the mode is off. Regression: web endpoints, using an exit node with LAN bypass, a reconnect right after boot (heap back to normal), peers direct.
+
+### Added
+- **The router can offer itself as an exit node** (#18). One switch on the Tailscale page, off by default: it advertises the default routes, masquerades the clients' traffic behind the uplink address, and runs the DNS service official Tailscale clients expect from an exit node — without that last part a client could reach addresses but not resolve names, which is what #18 reported. The DNS service and the microlink change that advertises it are by [@5queezer](https://github.com/5queezer) (#16, microlink #3); the switch, the automatic NAT and the mutual exclusion with *using* an exit node follow the approach of [@Mattboxx](https://github.com/Mattboxx)'s fork. Changes on top of #16: the DNS service has its own small HTTP server on its own port and runs only in this mode (the admin web server handles one request at a time, so sharing it would stall the UI under a browsing client); lookups use UDP with TCP only for truncated answers; a resolver in 100.64.0.0/10 is no longer rejected (legitimate since the CGNAT-uplink fix in 0.1.30). IPv4 only. Measured with an official client (Tailscale 1.102 on Linux) on a direct path: 5 MB in 45 s, about 0.9 Mbit/s; name lookups 0.12–0.25 s; free internal RAM 2 KB lower while the mode is on.
+
+### Fixed
+- **Internal RAM no longer collapses while traffic flows through an exit node** (microlink). With an exit node selected, a download by an AP client pushed free internal RAM from about 38 KB down to 4.5–5.5 KB — the pool the WiFi driver's buffers come from — and it only recovered when the transfer ended. Packets arriving from the tunnel were copied into internal RAM before being queued for the WireGuard task, and under load the 32-deep queue held up to ~45 KB of them. The copies now come from PSRAM, as the relay path's already did. Measured on the reference router during a 5 MB download through an exit node: minimum free internal RAM 38.2 KB instead of 4.5–5.5 KB, same download time.
+
+## [0.1.30] — 2026-10-05
+
+Three fixes: a memory leak that hit any reconnect arriving shortly after a connect, uplinks that live in the CGNAT range (#17, reported by @5queezer), and a race between the route supervisor and a reconnect (#14, contributed by @gszigethy). Device-tested before tagging on the WiFi-only reference router: manual OTA; a reconnect requested right after the tunnel came up, twice, with the heap back at its normal level each time; the web endpoints and the favicon; the route table and an AP client's traffic with the exit node off and with exit node plus LAN bypass on; six peers direct. The CGNAT case was measured with the router's own AP moved into 100.64.4.0/24; a real CGNAT uplink was not available.
+
+### Fixed
+- **An uplink in the CGNAT range no longer has its own traffic captured by the tunnel** (#17, reported by [@5queezer](https://github.com/5queezer)). The route hook sent every destination in 100.64.0.0/10 into the WireGuard tunnel. Starlink, many LTE/5G routers and some ISPs put the uplink itself in that range or hand out a resolver from it; the router's DNS queries then went into the tunnel, the control plane and the relays stopped resolving, and the node dropped off the tailnet with a perfectly working uplink. A CGNAT destination that is not a tailnet peer now leaves through the real interface when it is on-link there, is one of the resolvers in use, or is the uplink's DHCP server. Tailnet peers still go to the tunnel even when the uplink's prefix covers them: the WireGuard interface knows each peer as a host route and is asked first. `/api/tools/route` explains the decision the same way. Measured on the reference router with its own AP moved into 100.64.4.0/24: before, the router could not reach its own AP client (ping 100% loss, port-map dead); after, ping, port-map, the client's internet access and DNS, and client-to-tailnet traffic all work, and tailnet peers are still routed to the tunnel.
+- **A reconnect shortly after a connect leaked the whole Tailscale instance** (microlink). When a reconnect arrived within about half a minute of the previous connect — a WiFi flap soon after boot is enough — the old instance was never freed: about 650 KB of PSRAM and 7 KB of internal RAM gone until the next reboot, each time. Right after the first netmap the coordination task measures the relay regions (28 lookups and probes, up to 25 s) and did not notice a stop request while doing so; the stop gave up after 15 s and the instance was then left alone on purpose rather than freed under a running task. The measurement now stops within a quarter of a second, and an instance whose tasks have all exited by the time it is destroyed is freed after all. Measured on the reference router: heap back at its normal level after such a reconnect, and the tunnel returns 24 s sooner.
+- **The route supervisor no longer works on a Tailscale instance that is being torn down.** Every two seconds it pins the tunnel's output, picks the default route and reads the peers' routes through pointers that a reconnect could free underneath it; the lifecycle lock so far only kept connect and disconnect apart. The supervisor now takes the same lock without waiting and skips a pass while a reconnect is running. Its interface lookup, default-route switch and accepted-routes update now run in the TCP/IP thread — the default-route switch used a core lock that is compiled out in this build, so it was not synchronised at all. Contributed by [@gszigethy](https://github.com/gszigethy) (#14).
+
+## [0.1.30-beta1+W5500] - 2026-10-03
+
+### Fixed
+- Integrates fork PR #7: protects route-supervisor access during Tailscale teardown and synchronizes lwIP callbacks in either core-locking mode.
+- Integrates fork PR #8: follows the active leased uplink for AP, relay, and firmware DNS without clearing AP DHCP leases or changing exit-node routes.
+- Enables per-interface DNS storage to retain each uplink's resolver addresses.
+
+### Basis
+- Builds on the stable v0.1.29+W5500 source. The 0.1.30 version identifies this fork's development release; its upstream base remains v0.1.29.
+- Both fixes were previously device-tested together in v0.1.29-beta2+W5500; this newly versioned firmware awaits device confirmation.
+
+## [0.1.29+W5500] - 2026-10-03
+
+### Released
+- Promotes the device-tested beta3 source to the final upstream v0.1.29 plus Xiao W5500 release.
+- The route-supervisor lifecycle and active-uplink DNS fixes remain scheduled for v0.1.30-beta1+W5500.
+
+## [0.1.29-beta3+W5500] - 2026-10-03
+
+### Release candidate
+- Reissues the upstream `v0.1.29` plus Xiao W5500 delta as the candidate for the final `v0.1.29+W5500` release.
+- Excludes the route-supervisor lifecycle and active-uplink DNS fixes tested in beta2. Those changes are deferred together to the `v0.1.30-beta1+W5500` development line.
+- Requires device confirmation before promotion to the final release.
+
+## [0.1.29] — 2026-10-02
+
+Four small hardening fixes, two of them contributed by @gszigethy (#12, #13). Device-tested before tagging on the WiFi-only reference router: manual OTA; the favicon served without a session and every one of the 48 web endpoints registered; the same 20 route lookups before and after with the exit node off and with exit node plus LAN bypass on; an AP client reaching the gateway, the uplink LAN, a tailnet peer and the internet in both modes; SNMP on and off; six peers direct. The CGNAT-uplink case itself could not be reproduced on the bench (no such uplink here), so that fix rests on the code and on unchanged behaviour on an ordinary uplink.
+
+### Fixed
+- **Web endpoints can no longer vanish silently.** The HTTP server's handler table was sized for exactly the 58 endpoints registered, and the result of each registration was ignored, so the next endpoint added would simply have answered 404 with nothing in the log. Registrations are now checked and logged, and the table has headroom (72).
+- **No more `/favicon.ico` 404s.** Every open browser tab produced a 404 and a "URI not found" warning in the device log. The web UI now carries its icon inline, and `/favicon.ico` serves the same icon (no login needed) for clients that ask anyway. Both ideas from [@gszigethy](https://github.com/gszigethy)'s fork.
+- **An uplink with a CGNAT address is no longer mistaken for the tunnel.** The route hook recognised the WireGuard interface by its 100.64.0.0/10 address, but an uplink can hold an address from that range too (Starlink, many LTE/5G routers, some ISPs). Until the tunnel had its own address — at boot and on every reconnect — the uplink itself was taken for the tunnel, so the exit-node supervisor could point the default route at it, and its subnet stayed excluded from the LAN bypass afterwards. The tunnel is now identified by its interface name (`wg`), as the MTU code and the SNMP agent already did. Contributed by [@gszigethy](https://github.com/gszigethy) (#13).
+- **LAN bypass no longer routes into an interface that is down.** With an exit node and LAN bypass on, the route hook returned the first interface whose prefix contained the destination without checking that it was up, so an interface that had lost its link but still held its address silently swallowed traffic to its old subnet. It now skips interfaces that are not up and link-up; `/api/tools/route` mirrors the same check. Contributed by [@gszigethy](https://github.com/gszigethy) (#12).
+
 ## [0.1.28] — 2026-10-01
 
 A read-only SNMP agent, contributed by @gszigethy (#11). Off by default, and it costs no internal RAM until it is switched on. Device-tested before tagging on the WiFi-only reference router: manual OTA, full walk (82 objects) over v2c and v1, wrong and empty communities ignored, malformed and oversized datagrams survived, interface counters checked against real traffic, three tunnel reconnects with the agent running, repeated rapid enable/disable, settings kept across a reboot, internal heap back to the never-enabled level after disable (about 4.7 KB lower while enabled), six peers direct, an AP client through the router.

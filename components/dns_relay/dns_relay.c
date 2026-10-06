@@ -113,14 +113,16 @@ static SemaphoreHandle_t  s_cache_mtx = NULL;
 static volatile uint32_t st_queries, st_hits, st_misses, st_inserts, st_evictions;
 
 /* Resolve the live upstream IP every forward. Priority: explicit override,
- * then STA-learned DNS, then 1.1.1.1 (so we never serve garbage). */
+ * then the physical default uplink's DNS, then 1.1.1.1. The ESP-NETIF
+ * default tracks Ethernet/STA promotion independently of the WG default. */
 static uint32_t pick_upstream(void)
 {
     if (s_upstream_nbo) return s_upstream_nbo;
-    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    if (sta) {
+    esp_netif_t *uplink = esp_netif_get_default_netif();
+    esp_netif_ip_info_t ip = {0};
+    if (uplink && esp_netif_is_netif_up(uplink) && esp_netif_get_ip_info(uplink, &ip) == ESP_OK && ip.ip.addr) {
         esp_netif_dns_info_t info = {0};
-        if (esp_netif_get_dns_info(sta, ESP_NETIF_DNS_MAIN, &info) == ESP_OK) {
+        if (esp_netif_get_dns_info(uplink, ESP_NETIF_DNS_MAIN, &info) == ESP_OK) {
             uint32_t a = info.ip.u_addr.ip4.addr;
             if (a != 0) return a;
         }
