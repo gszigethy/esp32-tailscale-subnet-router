@@ -20,37 +20,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - language: c-cpp
-            build_mode: manual
-          - language: python
-            build_mode: none
+        # c-cpp = the ESP-IDF firmware (main/ + components/), scanned buildless
+        #         so no cross-compile toolchain is needed in CI.
+        # python = the build/test tooling (tools/, gen scripts).
+        language: [c-cpp, python]
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          submodules: recursive
-
-      - name: Set up Python
-        if: matrix.language == 'c-cpp'
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
-        with:
-          python-version: "3.13"
-
-      - name: Install PlatformIO Core
-        if: matrix.language == 'c-cpp'
-        run: python -m pip install --require-hashes --only-binary :all: -r .github/ci/requirements.txt
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
         with:
           languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build_mode }}
+          build-mode: none
           config-file: ./.github/codeql/codeql-config.yml
-
-      - name: Build firmware for CodeQL
-        if: matrix.language == 'c-cpp'
-        run: pio run -e esp32-s3
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
