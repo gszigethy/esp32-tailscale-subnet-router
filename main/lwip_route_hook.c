@@ -9,10 +9,15 @@
  * tunnel for the chosen exit node to forward out. The WG netif's own
  * encapsulated UDP packets must NOT use that default route (they would
  * loop back into the tunnel), so we pin the WG UDP socket to the
- * upstream STA netif via wireguardif_set_upstream_netif().
+ * upstream netif via wireguardif_set_upstream_netif().
  *
- * A background task watches tailscale_exit_node_ip and the WG/STA
+ * A background task watches tailscale_exit_node_ip and the WG/uplink
  * netif state and flips netif_default + the WG UDP pin in lockstep.
+ *
+ * "Uplink" here means whichever interface is upstream — wired ETH or WiFi
+ * STA, decided structurally by netif_is_uplink() rather than by lwIP's
+ * 2-char netif name. Every path below used to test name == "st", which made
+ * the whole module inert on a wired-only device.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -93,20 +98,43 @@ static inline bool netif_is_ap(const struct netif *n)
     return n && n->name[0] == 'a' && n->name[1] == 'p';
 }
 
-static inline bool netif_is_sta(const struct netif *n)
+/* True when this netif is an upstream uplink: up and link-up with an address,
+ * and none of the downstream AP, the WG overlay or lwIP's loopback ("lo",
+ * present with CONFIG_LWIP_NETIF_LOOPBACK). Structural rather than one name,
+ * so wired ETH qualifies alongside WiFi STA -- the old name == "st" test
+ * silently excluded Ethernet from every path below. The overlay is excluded
+ * by identity, not by its 100.64/10 address, so an uplink that is itself
+ * addressed from CGNAT space (Starlink, many LTE routers) still counts. */
+static inline bool netif_is_uplink(const struct netif *n)
 {
-    return n && n->name[0] == 's' && n->name[1] == 't';
+    if (!n || !netif_is_up(n) || !netif_is_link_up(n)) return false;
+    const ip4_addr_t *addr = netif_ip4_addr(n);
+    if (addr == NULL || ip4_addr_isany_val(*addr)) return false;
+    if (netif_is_ap(n) || netif_is_wg(n)) return false;
+    return !(n->name[0] == 'l' && n->name[1] == 'o');
 }
 
-static struct netif *find_sta_netif(void)
+/* The upstream uplink, whichever interface it happens to be.
+ *
+ * Identified structurally rather than by lwIP's 2-char name: an uplink is any
+ * netif that is up, has an address, and is neither the AP (downstream) nor the
+ * WG tunnel (the overlay itself). Matching on "st" only — as this module used
+ * to — silently disabled every exit-node code path on a wired device, because
+ * find_uplink_netif() returned NULL and the callers are all gated on it.
+ *
+ * When several qualify, whatever esp_netif has promoted to netif_default wins;
+ * that is the interface the stack already considers primary (ETH once it holds
+ * a lease), so we agree with it instead of competing. */
+static struct netif *find_uplink_netif(void)
 {
     extern struct netif *netif_list;
+    struct netif *fallback = NULL;
     for (struct netif *n = netif_list; n; n = n->next) {
-        if (netif_is_sta(n) && netif_is_up(n) && netif_is_link_up(n)) {
-            return n;
-        }
+        if (!netif_is_uplink(n)) continue;
+        if (n == netif_default) return n;
+        if (fallback == NULL) fallback = n;
     }
-    return NULL;
+    return fallback;
 }
 
 /* An uplink can live in 100.64.0.0/10 itself, or hand out a resolver from
@@ -147,7 +175,7 @@ static struct netif *cgnat_local_exception(uint32_t dst_hbo, const char **why)
         }
     }
 
-    struct netif *uplink = find_sta_netif();
+    struct netif *uplink = find_uplink_netif();
     if (uplink == NULL) return NULL;
     for (u8_t i = 0; i < DNS_MAX_SERVERS; i++) {
         const ip_addr_t *srv = dns_getserver(i);
@@ -166,8 +194,22 @@ static struct netif *cgnat_local_exception(uint32_t dst_hbo, const char **why)
     return NULL;
 }
 
-static struct netif *s_original_default = NULL;
-static bool s_wg_udp_pinned = false;
+/* The default route as it stood immediately before we pointed it at the WG
+ * netif for exit-node mode, so we can put it back on the way out. Captured at
+ * override time rather than at task start: this task is created before the
+ * uplinks exist, so an early snapshot would freeze whatever happened to be
+ * default during boot (the WiFi STA) and we would later restore a netif that
+ * has no address on a wired-only device. NULL = we are not overriding. */
+static struct netif *s_pre_exit_default = NULL;
+/* The uplink the WG UDP socket is pinned to while exit-node mode is on, NULL
+ * when unpinned. A pointer rather than a flag so the pin can follow the
+ * uplink: with two of them, pulling the ETH cable must move the encapsulated
+ * WireGuard traffic to the WiFi STA instead of leaving it on a dead link. */
+static struct netif *s_wg_udp_pin = NULL;
+/* The microlink instance that pin was applied to. A Tailscale reconnect
+ * builds a new instance that starts unpinned, so a changed handle also
+ * means "pin again". */
+static microlink_t *s_wg_udp_pin_ml = NULL;
 static esp_ping_handle_t s_keepalive_ping = NULL;
 static uint32_t s_keepalive_target = 0;
 
@@ -251,7 +293,7 @@ static void supervisor_netifs_cb(void *ctx)
 {
     supervisor_netifs_t *state = ctx;
     state->wg = find_wg_netif();
-    state->uplink = find_sta_netif();
+    state->uplink = find_uplink_netif();
     state->wg_ready = state->wg && netif_is_up(state->wg);
 }
 
@@ -313,7 +355,8 @@ static void route_supervisor_task(void *arg)
         static uint32_t seen_generation = 0;
         uint32_t generation = tailscale_lifecycle_generation();
         if (generation != seen_generation) {
-            s_wg_udp_pinned = false;
+            s_wg_udp_pin = NULL;
+            s_wg_udp_pin_ml = NULL;
             seen_generation = generation;
         }
         /* This executes in TCP/IP context with core locking off, or under
@@ -332,15 +375,6 @@ static void route_supervisor_task(void *arg)
          * as usable as soon as it has its IP and is administratively up. */
         bool wg_ready = netifs.wg_ready;
 
-        if (s_original_default == NULL && netif_default != NULL &&
-            (!wg || netif_default != wg)) {
-            s_original_default = netif_default;
-            ESP_LOGI(TAG, "Cached original default route: %c%c%d",
-                     netif_default->name[0], netif_default->name[1],
-                     netif_default->num);
-        }
-
-        struct netif *want = NULL;
         if (tailscale_exit_node_ip != 0) {
             if (wg_ready && uplink != NULL) {
                 microlink_t *ml = tailscale_get_microlink();
@@ -348,36 +382,62 @@ static void route_supervisor_task(void *arg)
                  * to enqueue its pin callback, so cached success is unsafe. */
                 esp_err_t pr = ml ? pin_wg_output_sync(ml, uplink, pin_done, pin_completion) : ESP_ERR_INVALID_STATE;
                 if (pr == ESP_OK) {
-                    if (!s_wg_udp_pinned) {
+                    if (s_wg_udp_pin != uplink || s_wg_udp_pin_ml != ml) {
                         ESP_LOGI(TAG, "WG UDP pin requested on upstream %c%c%d",
                                  uplink->name[0], uplink->name[1], uplink->num);
                     }
-                    s_wg_udp_pinned = true;
+                    s_wg_udp_pin = uplink;
+                    s_wg_udp_pin_ml = ml;
                 }
-                want = wg;
+                if (netif_default != wg) {
+                    if (s_pre_exit_default == NULL) s_pre_exit_default = netif_default;
+                    ESP_LOGI(TAG, "Exit-node on — default route %c%c%d -> %c%c%d",
+                             netif_default ? netif_default->name[0] : '?',
+                             netif_default ? netif_default->name[1] : '?',
+                             netif_default ? netif_default->num : 0,
+                             wg->name[0], wg->name[1], wg->num);
+                    set_default_via_tcpip(wg);
+                }
                 /* Keep the WG session warm on the chosen exit node — without
                  * this its tailscaled lazy-trims us after ~4 minutes idle. */
                 keepalive_start(tailscale_exit_node_ip);
             }
         } else {
-            want = s_original_default;
-            if (s_wg_udp_pinned) {
+            /* Exit-node off. Undo our override exactly once, on the
+             * transition — never on every tick. Re-asserting a remembered
+             * default here fought esp_netif's own uplink promotion and
+             * black-holed a wired device: ETH would win the default on its
+             * DHCP lease and be dragged back to the address-less WiFi STA
+             * within 2 s, so everything outbound failed EHOSTUNREACH.
+             * Whichever uplink esp_netif has promoted is the right answer. */
+            if (s_pre_exit_default != NULL) {
+                if (wg && netif_default == wg) {
+                    /* Hand the default back to whichever uplink is live NOW,
+                     * not to the one that happened to hold it when exit-node
+                     * was switched on. Those differ routinely: a wired box
+                     * boots with the WiFi STA as default, ETH takes over on
+                     * its DHCP lease, and restoring the remembered STA — which
+                     * by then has no address at all — black-holes everything
+                     * outbound. The remembered netif is only a fallback for
+                     * the window where no uplink qualifies, and using it is
+                     * also what keeps this from dereferencing a netif that
+                     * has since been torn down. */
+                    struct netif *restore = uplink;
+                    if (restore == NULL) restore = s_pre_exit_default;
+                    ESP_LOGI(TAG, "Exit-node off — restoring default route to %c%c%d",
+                             restore->name[0], restore->name[1], restore->num);
+                    set_default_via_tcpip(restore);
+                }
+                s_pre_exit_default = NULL;
+            }
+            if (s_wg_udp_pin != NULL) {
                 microlink_t *ml = tailscale_get_microlink();
                 if (ml) pin_wg_output_sync(ml, NULL, pin_done, pin_completion);
-                s_wg_udp_pinned = false;
+                s_wg_udp_pin = NULL;
+                s_wg_udp_pin_ml = NULL;
                 ESP_LOGI(TAG, "WG UDP unpinned (exit node off)");
             }
             keepalive_stop();
-        }
-
-        if (want != NULL && want != netif_default) {
-            ESP_LOGI(TAG, "Switching default route: %c%c%d -> %c%c%d (exit_node=%lu)",
-                     netif_default ? netif_default->name[0] : '?',
-                     netif_default ? netif_default->name[1] : '?',
-                     netif_default ? netif_default->num : 0,
-                     want->name[0], want->name[1], want->num,
-                     (unsigned long)tailscale_exit_node_ip);
-            set_default_via_tcpip(want);
         }
 
         /* Phase 1.9n: rebuild accept-routes table from microlink peer info.
@@ -444,7 +504,8 @@ void lwip_route_hook_init(void)
  *   1. CGNAT dst (100.64.0.0/10) — always to wg netif (Phase 1.5c).
  *   2. Exit-node on AND lan_bypass on AND dst is in some non-wg netif's
  *      prefix → that netif.
- *   3. Exit-node on AND lan_bypass on AND dst is RFC1918 private → STA.
+ *   3. Exit-node on AND lan_bypass on AND dst is RFC1918 private → the
+ *      upstream uplink (ETH or STA).
  *   4. Fall through to ESP-IDF default behavior (matching src IP →
  *      netif).
  */
@@ -542,19 +603,19 @@ struct netif *__wrap_ip4_route_src_hook(const ip4_addr_t *src,
         }
     }
 
-    /* 2. Exit-node + lan_bypass: send LAN-class traffic to STA, not the
-     * tunnel. Two passes, mirroring tailscale Go but extended:
+    /* 2. Exit-node + lan_bypass: send LAN-class traffic out the uplink, not
+     * the tunnel. Two passes, mirroring tailscale Go but extended:
      *   2a. Netif-prefix match — the upstream behaviour. Catches the
-     *       STA's DHCP-assigned subnet directly (e.g. 192.168.1.0/24).
+     *       uplink's DHCP-assigned subnet directly (e.g. 192.168.1.0/24).
      *   2b. RFC 1918 private fallback — sends non-netif-prefix private
      *       addresses (e.g. 192.168.1.1 on the home router behind the
-     *       STA's gateway) to the STA. This is *broader* than upstream
+     *       uplink's gateway) out the uplink. This is *broader* than upstream
      *       tailscale, which only knows about netif-attached prefixes,
      *       but matches user intent: "anything reachable through my
      *       physical LAN should not detour via the exit node". */
     if (tailscale_exit_node_ip != 0 && tailscale_lan_bypass) {
         extern struct netif *netif_list;
-        struct netif *sta_match = NULL;
+        struct netif *uplink_match = NULL;
 
         for (struct netif *n = netif_list; n; n = n->next) {
             const ip4_addr_t *addr = netif_ip4_addr(n);
@@ -586,27 +647,24 @@ struct netif *__wrap_ip4_route_src_hook(const ip4_addr_t *src,
                 }
                 return n;
             }
-            /* Remember the first non-wg, non-AP netif for the RFC1918
-             * fallback below — that's where we'd route LAN traffic
-             * that doesn't sit in our own subnet but is reachable
-             * via the upstream router. */
-            if (sta_match == NULL && netif_is_sta(n) &&
-                netif_is_up(n) && netif_is_link_up(n)) {
-                sta_match = n;
-            }
         }
+        /* The uplink for the RFC1918 fallback below — where LAN traffic goes
+         * when it isn't in one of our own prefixes but is reachable via the
+         * upstream router. Resolved once, after the prefix scan, and uplink-
+         * agnostic so a wired router behaves like a WiFi one. */
+        uplink_match = find_uplink_netif();
 
         /* 2b: RFC 1918 fallback. */
         bool is_private = ip_is_rfc1918(dst_hbo);
-        if (is_private && sta_match != NULL) {
+        if (is_private && uplink_match != NULL) {
             if (should_log_route_hook()) {
                 ESP_LOGW(TAG, "[ROUTE_HOOK] LAN_RFC1918 src=%lu.%lu.%lu.%lu "
                          "dst=%lu.%lu.%lu.%lu -> %c%c%u",
                          (src_hbo>>24)&0xFF, (src_hbo>>16)&0xFF, (src_hbo>>8)&0xFF, src_hbo&0xFF,
                          (dst_hbo>>24)&0xFF, (dst_hbo>>16)&0xFF, (dst_hbo>>8)&0xFF, dst_hbo&0xFF,
-                         sta_match->name[0], sta_match->name[1], sta_match->num);
+                         uplink_match->name[0], uplink_match->name[1], uplink_match->num);
             }
-            return sta_match;
+            return uplink_match;
         }
     }
 
@@ -617,7 +675,7 @@ struct netif *__wrap_ip4_route_src_hook(const ip4_addr_t *src,
      * tunnel, but the ESP's own DERP/STUN/control-plane sessions are
      * what KEEP the tunnel alive — routing those via wg would loop
      * (chicken & egg). So we split here:
-     *   - self-origin to public dst → STA upstream
+     *   - self-origin to public dst → the upstream uplink
      *   - forwarded (non-self) to public dst → WG tunnel (the actual
      *     exit-node egress). This is the egress path we previously
      *     relied on netif_default for, but the esp_netif framework
@@ -637,18 +695,16 @@ struct netif *__wrap_ip4_route_src_hook(const ip4_addr_t *src,
             /* CGNAT was already returned in step 1; here we just need
              * to bypass exit-node for the remaining public space. */
             if (!is_priv) {
-                extern struct netif *netif_list;
-                for (struct netif *n = netif_list; n; n = n->next) {
-                    if (netif_is_sta(n) && netif_is_up(n) && netif_is_link_up(n)) {
-                        if (should_log_route_hook()) {
-                            ESP_LOGW(TAG, "[ROUTE_HOOK] SELF_PUBLIC src=%lu.%lu.%lu.%lu "
-                                     "dst=%lu.%lu.%lu.%lu -> %c%c%u",
-                                     (src_hbo>>24)&0xFF, (src_hbo>>16)&0xFF, (src_hbo>>8)&0xFF, src_hbo&0xFF,
-                                     (dst_hbo>>24)&0xFF, (dst_hbo>>16)&0xFF, (dst_hbo>>8)&0xFF, dst_hbo&0xFF,
-                                     n->name[0], n->name[1], n->num);
-                        }
-                        return n;
+                struct netif *up = find_uplink_netif();
+                if (up != NULL) {
+                    if (should_log_route_hook()) {
+                        ESP_LOGW(TAG, "[ROUTE_HOOK] SELF_PUBLIC src=%lu.%lu.%lu.%lu "
+                                 "dst=%lu.%lu.%lu.%lu -> %c%c%u",
+                                 (src_hbo>>24)&0xFF, (src_hbo>>16)&0xFF, (src_hbo>>8)&0xFF, src_hbo&0xFF,
+                                 (dst_hbo>>24)&0xFF, (dst_hbo>>16)&0xFF, (dst_hbo>>8)&0xFF, dst_hbo&0xFF,
+                                 up->name[0], up->name[1], up->num);
                     }
+                    return up;
                 }
             }
         } else if (!is_priv) {
@@ -796,7 +852,6 @@ void route_explain(uint32_t src_hbo, uint32_t dst_hbo,
 
     /* 2. Exit-node + lan-bypass — netif prefix match, then RFC1918. */
     if (tailscale_exit_node_ip != 0 && tailscale_lan_bypass) {
-        struct netif *sta_match = NULL;
         for (struct netif *n = netif_list; n; n = n->next) {
             const ip4_addr_t *addr = netif_ip4_addr(n);
             const ip4_addr_t *mask = netif_ip4_netmask(n);
@@ -809,35 +864,35 @@ void route_explain(uint32_t src_hbo, uint32_t dst_hbo,
                          "netif prefix match (lan-bypass step 2a, exit-node on)");
                 return;
             }
-            if (!sta_match && netif_is_sta(n) && netif_is_up(n) && netif_is_link_up(n)) {
-                sta_match = n;
-            }
         }
+        struct netif *uplink_match = find_uplink_netif();
         bool is_private = ip_is_rfc1918(dst_hbo);
-        if (is_private && sta_match) {
-            name_netif(sta_match, out_netif, out_netif_size);
+        if (is_private && uplink_match) {
+            name_netif(uplink_match, out_netif, out_netif_size);
             snprintf(out, out_size,
-                     "RFC1918 destination, lan-bypass → STA upstream");
+                     "RFC1918 destination, lan-bypass → %c%c%d upstream",
+                     uplink_match->name[0], uplink_match->name[1],
+                     uplink_match->num);
             return;
         }
     }
 
     /* 2c. Exit-node split — mirrors the live hook's step 3. Self-origin
-     * public destinations egress via STA (chicken-and-egg bypass for the
-     * ESP's own DERP/STUN sessions); forwarded public destinations egress
+     * public destinations egress via the uplink (chicken-and-egg bypass for
+     * the ESP's own DERP/STUN sessions); forwarded public destinations egress
      * via the WG tunnel (the actual exit-node forwarding path). */
     if (tailscale_exit_node_ip != 0) {
         bool is_priv = ip_is_rfc1918(dst_hbo);
         if (!is_priv) {
             if (src_is_self) {
-                for (struct netif *n = netif_list; n; n = n->next) {
-                    if (netif_is_sta(n) && netif_is_up(n) && netif_is_link_up(n)) {
-                        name_netif(n, out_netif, out_netif_size);
-                        snprintf(out, out_size,
-                                 "self-origin public dst → STA "
-                                 "(bypassing exit-node to break chicken-and-egg)");
-                        return;
-                    }
+                struct netif *up = find_uplink_netif();
+                if (up) {
+                    name_netif(up, out_netif, out_netif_size);
+                    snprintf(out, out_size,
+                             "self-origin public dst → %c%c%d "
+                             "(bypassing exit-node to break chicken-and-egg)",
+                             up->name[0], up->name[1], up->num);
+                    return;
                 }
             } else {
                 struct netif *wg = find_wg_netif();
@@ -986,7 +1041,7 @@ err_t __wrap_ip_napt_forward(struct pbuf *p, struct ip_hdr *iphdr,
         if ((tailscale_snat_subnet_routes || tailscale_exit_server_active()) &&
             inp && outp && inp != outp &&
             !ip_in_cgnat(dest_hbo) &&
-            inp == find_wg_netif() && netif_is_sta(outp)) {
+            inp == find_wg_netif() && netif_is_uplink(outp)) {
             uint8_t saved = inp->napt;
             inp->napt = 1;
             err_t r = __real_ip_napt_forward(p, iphdr, inp, outp);

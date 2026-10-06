@@ -147,6 +147,19 @@ void tailscale_init(void)
     tailscale_advertise_routes = nvs_str_or_empty("ts_routes");
     if (nvs_param_get_int("ts_adv_ap", &v) == ESP_OK) {
         tailscale_advertise_ap = v ? 1 : 0;
+    } else {
+        /* Migration. This fork used to advertise the AP subnet from a
+         * Status-page toggle (ap_route_en, default off); upstream 0.1.24
+         * replaced it with ts_adv_ap, default on, and 0.1.25-W5500 merged the
+         * two. Without this, an operator who had deliberately turned the AP
+         * route off would silently start advertising it after the update.
+         * Carry the old value over once, then the new key owns it. */
+        uint8_t legacy = 0;
+        if (nvs_param_get_u8("ap_route_en", &legacy) == ESP_OK) {
+            tailscale_advertise_ap = legacy ? 1 : 0;
+            nvs_param_set_int("ts_adv_ap", tailscale_advertise_ap);
+            ESP_LOGI(TAG, "migrated ap_route_en=%u to ts_adv_ap", (unsigned)legacy);
+        }
     }
     if (nvs_param_get_int("ts_adv_exit", &v) == ESP_OK) {
         tailscale_advertise_exit_node = v ? 1 : 0;
@@ -359,7 +372,7 @@ static esp_err_t tailscale_connect_locked(void)
         .ctrl_watchdog_ms = 0,
         .ctrl_host = (tailscale_login_server && tailscale_login_server[0]) ? tailscale_login_server : NULL,
         .ipn_version = ipn_version_effective(),
-        .advertise_routes = tailscale_advertise_routes_effective(),
+        .advertise_routes = tailscale_compose_routes(),   /* W5500 fork: + ETH/STA auto-routes */
         .peer_api_port = tailscale_exit_server_active() ? TAILSCALE_PEERAPI_PORT : 0,
         .netcheck_override_enabled = (tailscale_netcheck_override != 0),
         .netcheck_override_threshold_ms = (uint32_t)tailscale_netcheck_threshold_ms,
@@ -490,4 +503,103 @@ void tailscale_connect_task(void *pvParameters)
     (void)tailscale_connect_locked();
     life_unlock();
     vTaskDelete(NULL);
+}
+
+/* ---- W5500 fork: per-interface auto-routes -------------------------------
+ *
+ * Kept as a layer on top of tailscale_advertise_routes_effective() rather than
+ * a rewrite of it, so upstream changes to the AP/manual composition flow
+ * through untouched. The per-interface CIDRs are cached in NVS by main.c's
+ * got-IP handlers (eth_route_cidr / sta_route_cidr); the enable flags are the
+ * live globals main.c loads at boot -- not a fresh NVS read, whose "key
+ * absent" default would disagree with main.c's (ETH defaults on). */
+extern volatile uint8_t eth_route_en;
+extern volatile uint8_t sta_route_en;
+/* Live uplink state (main.c). A cached CIDR is only advertised while its
+ * uplink holds a lease: advertising a LAN the router cannot currently reach
+ * makes tailnet clients send that subnet into a dead end. main.c reconnects
+ * Tailscale on every uplink up/down, which re-runs this composition. */
+extern volatile int eth_connect;
+extern volatile int sta_connect;
+
+/* Append `cidr` as a new line unless it is empty or already listed. Returns
+ * false when it does not fit, i.e. it was dropped. `buf` is a NUL-terminated,
+ * newline-separated list. */
+static bool fork_routes_append_unique(char *buf, size_t buf_size, const char *cidr)
+{
+    if (!cidr || !cidr[0]) return true;
+    size_t clen = strlen(cidr);
+    for (const char *p = buf; *p; ) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        if (len == clen && strncmp(p, cidr, clen) == 0) return true;
+        if (!eol) break;
+        p = eol + 1;
+    }
+    size_t used = strlen(buf);
+    size_t need = clen + (used ? 1 : 0);
+    if (used + need >= buf_size) return false;
+    if (used) buf[used++] = '\n';
+    memcpy(buf + used, cidr, clen + 1);
+    return true;
+}
+
+static bool routes_append_cached(char *buf, size_t buf_size, const char *nvs_key)
+{
+    char *cidr = nvs_param_get_str(nvs_key);
+    bool ok = fork_routes_append_unique(buf, buf_size, cidr);
+    free(cidr);
+    return ok;
+}
+
+const char *tailscale_compose_routes(void)
+{
+    /* Sized to what microlink keeps: it copies advertise_routes into a
+     * 256-byte field (255 characters), so anything longer used to be cut
+     * mid-CIDR while the UI preview listed it in full. Composing into the
+     * same limit, whole entries only, makes the preview exactly what is
+     * advertised. Exit-server defaults are reserved first so a long manual
+     * list cannot remove half of the required pair. The auto-routes go next
+     * so the zero-touch LAN routes win over a long manual list; whatever does not fit is dropped and logged.
+     * Not reentrant, exactly like the upstream helper: the connect path is
+     * serialized by s_life_mux, but a web UI preview landing in the same
+     * instant shares the buffer for that one call. */
+    static char buf[256];
+    static int  s_last_dropped = 0;
+    int dropped = 0;
+    buf[0] = '\0';
+    if (tailscale_exit_server_active()) {
+        fork_routes_append_unique(buf, sizeof buf, "0.0.0.0/0");
+        fork_routes_append_unique(buf, sizeof buf, "::/0");
+    }
+    if (eth_route_en && eth_connect &&
+        !routes_append_cached(buf, sizeof buf, "eth_route_cidr")) dropped++;
+    if (sta_route_en && sta_connect &&
+        !routes_append_cached(buf, sizeof buf, "sta_route_cidr")) dropped++;
+
+    /* Then upstream's AP subnet + manual list, entry by entry. */
+    const char *p = tailscale_advertise_routes_effective();
+    while (p && *p) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        char cidr[64];
+        if (len > 0 && len < sizeof cidr) {
+            memcpy(cidr, p, len);
+            cidr[len] = '\0';
+            if (!fork_routes_append_unique(buf, sizeof buf, cidr)) dropped++;
+        } else if (len > 0) {
+            dropped++;
+        }
+        p = eol ? eol + 1 : NULL;
+    }
+
+    /* Logged on change only: the web UI calls this on every preview. */
+    if (dropped != s_last_dropped) {
+        if (dropped) {
+            ESP_LOGW(TAG, "advertised routes exceed microlink's 255-byte limit; "
+                          "%d route(s) not advertised", dropped);
+        }
+        s_last_dropped = dropped;
+    }
+    return buf[0] ? buf : NULL;
 }

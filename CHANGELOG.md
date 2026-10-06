@@ -6,6 +6,21 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.31-beta1+W5500] - 2026-10-06
+
+### From upstream
+- Rebases the W5500 fork onto upstream v0.1.31, including exit-node hosting and DNS service, reconnect and CGNAT fixes, and the updated microlink submodule.
+- The route-supervisor lifecycle fix is now provided by upstream PR #14.
+
+### Fork changes
+- Adapts exit-node DNS to the active leased Ethernet/WiFi uplink.
+- Preserves the exit-node default-route pair within the route advertisement size limit.
+- Retains the W5500 driver, wired routing/failover, Ethernet UI, active-uplink DNS, and fork OTA ownership.
+- Consolidates maintenance onto main; published release history is retained.
+
+### Validation
+- Prerelease; device confirmation of OTA, wired uplink, tunnel, and exit-node hosting is required before stable promotion.
+
 ## [0.1.31] — 2026-10-05
 
 A new mode and a memory fix. The router can now offer its own uplink as an exit node to tailnet devices, with the DNS service official Tailscale clients expect (#18; the DNS service and the microlink change behind it are by @5queezer). And traffic through an exit node no longer drains internal RAM. Device-tested before tagging on the WiFi-only reference router with an official client (Tailscale 1.102 on Linux) using it as exit node: the client selects the router, leaves through its uplink address, resolves names and loads sites by name; 5 MB in about 45 s (roughly 0.9 Mbit/s); 80 name lookups four at a time with the admin UI still answering within a fifth of a second; the DNS service refuses callers from the uplink side and its port is closed when the mode is off. Regression: web endpoints, using an exit node with LAN bypass, a reconnect right after boot (heap back to normal), peers direct.
@@ -24,6 +39,30 @@ Three fixes: a memory leak that hit any reconnect arriving shortly after a conne
 - **An uplink in the CGNAT range no longer has its own traffic captured by the tunnel** (#17, reported by [@5queezer](https://github.com/5queezer)). The route hook sent every destination in 100.64.0.0/10 into the WireGuard tunnel. Starlink, many LTE/5G routers and some ISPs put the uplink itself in that range or hand out a resolver from it; the router's DNS queries then went into the tunnel, the control plane and the relays stopped resolving, and the node dropped off the tailnet with a perfectly working uplink. A CGNAT destination that is not a tailnet peer now leaves through the real interface when it is on-link there, is one of the resolvers in use, or is the uplink's DHCP server. Tailnet peers still go to the tunnel even when the uplink's prefix covers them: the WireGuard interface knows each peer as a host route and is asked first. `/api/tools/route` explains the decision the same way. Measured on the reference router with its own AP moved into 100.64.4.0/24: before, the router could not reach its own AP client (ping 100% loss, port-map dead); after, ping, port-map, the client's internet access and DNS, and client-to-tailnet traffic all work, and tailnet peers are still routed to the tunnel.
 - **A reconnect shortly after a connect leaked the whole Tailscale instance** (microlink). When a reconnect arrived within about half a minute of the previous connect — a WiFi flap soon after boot is enough — the old instance was never freed: about 650 KB of PSRAM and 7 KB of internal RAM gone until the next reboot, each time. Right after the first netmap the coordination task measures the relay regions (28 lookups and probes, up to 25 s) and did not notice a stop request while doing so; the stop gave up after 15 s and the instance was then left alone on purpose rather than freed under a running task. The measurement now stops within a quarter of a second, and an instance whose tasks have all exited by the time it is destroyed is freed after all. Measured on the reference router: heap back at its normal level after such a reconnect, and the tunnel returns 24 s sooner.
 - **The route supervisor no longer works on a Tailscale instance that is being torn down.** Every two seconds it pins the tunnel's output, picks the default route and reads the peers' routes through pointers that a reconnect could free underneath it; the lifecycle lock so far only kept connect and disconnect apart. The supervisor now takes the same lock without waiting and skips a pass while a reconnect is running. Its interface lookup, default-route switch and accepted-routes update now run in the TCP/IP thread — the default-route switch used a core lock that is compiled out in this build, so it was not synchronised at all. Contributed by [@gszigethy](https://github.com/gszigethy) (#14).
+
+## [0.1.30-beta1+W5500] - 2026-10-03
+
+### Fixed
+- Integrates fork PR #7: protects route-supervisor access during Tailscale teardown and synchronizes lwIP callbacks in either core-locking mode.
+- Integrates fork PR #8: follows the active leased uplink for AP, relay, and firmware DNS without clearing AP DHCP leases or changing exit-node routes.
+- Enables per-interface DNS storage to retain each uplink's resolver addresses.
+
+### Basis
+- Builds on the stable v0.1.29+W5500 source. The 0.1.30 version identifies this fork's development release; its upstream base remains v0.1.29.
+- Both fixes were previously device-tested together in v0.1.29-beta2+W5500; this newly versioned firmware awaits device confirmation.
+
+## [0.1.29+W5500] - 2026-10-03
+
+### Released
+- Promotes the device-tested beta3 source to the final upstream v0.1.29 plus Xiao W5500 release.
+- The route-supervisor lifecycle and active-uplink DNS fixes remain scheduled for v0.1.30-beta1+W5500.
+
+## [0.1.29-beta3+W5500] - 2026-10-03
+
+### Release candidate
+- Reissues the upstream `v0.1.29` plus Xiao W5500 delta as the candidate for the final `v0.1.29+W5500` release.
+- Excludes the route-supervisor lifecycle and active-uplink DNS fixes tested in beta2. Those changes are deferred together to the `v0.1.30-beta1+W5500` development line.
+- Requires device confirmation before promotion to the final release.
 
 ## [0.1.29] — 2026-10-02
 

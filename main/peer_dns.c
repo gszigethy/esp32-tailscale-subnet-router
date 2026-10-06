@@ -211,16 +211,24 @@ static bool resolver_is_usable(uint32_t resolver_nbo)
 }
 
 /* Use an explicit DNS-relay upstream first, otherwise the resolver currently
- * installed on the STA netif.  There is intentionally no public fallback:
+ * installed on the active uplink (leased Ethernet before leased WiFi).
+ * There is intentionally no public fallback:
  * an absent or unsafe resolver is a configuration error, not permission to
  * send DNS traffic somewhere the operator did not choose. */
 static uint32_t select_resolver(void)
 {
     uint32_t resolver = dns_relay_get_upstream();
     if (resolver == 0) {
-        esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        extern volatile int sta_connect;
+        esp_netif_t *uplink = NULL;
+#ifdef CONFIG_ETH_W5500_ENABLED
+        extern volatile int eth_connect;
+        if (eth_connect) uplink = esp_netif_get_handle_from_ifkey("ETH_DEF");
+#endif
+        if (!uplink && sta_connect)
+            uplink = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
         esp_netif_dns_info_t info = {0};
-        if (!sta || esp_netif_get_dns_info(sta, ESP_NETIF_DNS_MAIN, &info) != ESP_OK ||
+        if (!uplink || esp_netif_get_dns_info(uplink, ESP_NETIF_DNS_MAIN, &info) != ESP_OK ||
             info.ip.type != ESP_IPADDR_TYPE_V4) {
             return 0;
         }

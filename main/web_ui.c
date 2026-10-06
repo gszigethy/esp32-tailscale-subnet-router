@@ -21,6 +21,7 @@
 #include "lwip/ip4_addr.h"
 #include "web_ui.h"
 #include "peer_dns.h"
+#include "eth_uplink.h"
 #include "tailscale_config.h"
 #include "tailscale_mtu.h"
 #include "nvs_params.h"
@@ -64,9 +65,17 @@
 #include "freertos/task.h"
 #include "driver/temperature_sensor.h"
 
-/* Globals owned by main.c — link status flags rendered in /api/status. */
-extern volatile int ap_connect;
+/* Globals owned by main.c — link status flags rendered in /api/status.
+ * sta_connect is WiFi STA alone (not main.c's any-uplink ap_connect), so the
+ * Status page's WiFi card doesn't claim "Connected" on an ETH-only box. The
+ * wired side is reported separately from eth_uplink_connected(). */
+extern volatile int sta_connect;
 extern volatile int connect_count;
+extern volatile uint8_t eth_route_en;
+extern volatile uint8_t sta_route_en;
+extern volatile uint8_t sta_uplink_en;
+/* Owned by main.c — persists the switch and applies it to the radio live. */
+extern void sta_uplink_set(uint8_t enable);
 
 static const char *TAG = "web_ui";
 
@@ -261,9 +270,12 @@ static esp_err_t status_handler(httpd_req_t *req)
 
     /* STA (uplink) — SSID, IP, RSSI, MAC. */
     cJSON *sta = cJSON_CreateObject();
-    cJSON_AddBoolToObject(sta, "connected", ap_connect != 0);
+    cJSON_AddBoolToObject(sta, "connected", sta_connect != 0);
+    /* Lets the SPA distinguish "switched off" from "failed to associate" —
+     * an intentionally wired-only router must not render as a fault. */
+    cJSON_AddBoolToObject(sta, "uplink_en", sta_uplink_en != 0);
     wifi_ap_record_t apr;
-    if (ap_connect && esp_wifi_sta_get_ap_info(&apr) == ESP_OK) {
+    if (sta_connect && esp_wifi_sta_get_ap_info(&apr) == ESP_OK) {
         cJSON_AddStringToObject(sta, "ssid", (const char *)apr.ssid);
         cJSON_AddNumberToObject(sta, "rssi", apr.rssi);
         cJSON_AddNumberToObject(sta, "channel", apr.primary);
@@ -308,7 +320,75 @@ static esp_err_t status_handler(httpd_req_t *req)
     }
     cJSON_AddNumberToObject(sta, "bytes_in",  (double)netif_hooks_get_sta_bytes_in());
     cJSON_AddNumberToObject(sta, "bytes_out", (double)netif_hooks_get_sta_bytes_out());
+    /* STA subnet routing toggle and last-detected CIDR. */
+    cJSON_AddBoolToObject(sta, "route_en", sta_route_en != 0);
+    char *sta_cidr_nv = nvs_param_get_str("sta_route_cidr");
+    if (sta_cidr_nv && sta_cidr_nv[0])
+        cJSON_AddStringToObject(sta, "route_cidr", sta_cidr_nv);
+    free(sta_cidr_nv);
     cJSON_AddItemToObject(root, "sta", sta);
+
+    /* ETH (wired uplink) — connected, IP, mask, GW, CIDR, MAC. */
+    {
+        cJSON *eth = cJSON_CreateObject();
+        bool eth_conn = eth_uplink_connected();
+        cJSON_AddBoolToObject(eth, "connected", eth_conn);
+        /* Same three-state pattern as sta.uplink_en: lets the SPA tell
+         * "switched off" apart from "cable unplugged / no lease yet". */
+        cJSON_AddBoolToObject(eth, "uplink_en", eth_uplink_is_enabled());
+        if (eth_conn) {
+            uint32_t eth_ip, eth_mask, eth_gw;
+            if (eth_uplink_get_ip_info(&eth_ip, &eth_mask, &eth_gw)) {
+                char buf[16];
+                ip4_to_str(eth_ip, buf, sizeof buf);
+                cJSON_AddStringToObject(eth, "ip", buf);
+                ip4_to_str(eth_gw, buf, sizeof buf);
+                cJSON_AddStringToObject(eth, "gateway", buf);
+                int eth_pfx = subnet_mask_prefix_len(eth_mask);
+                if (eth_pfx >= 0) {
+                    cJSON_AddNumberToObject(eth, "prefix", eth_pfx);
+                    char netbuf[16], cidrbuf[32];
+                    ip4_to_str(eth_ip & eth_mask, netbuf, sizeof netbuf);
+                    snprintf(cidrbuf, sizeof cidrbuf, "%s/%u", netbuf, (unsigned)eth_pfx);
+                    cJSON_AddStringToObject(eth, "cidr", cidrbuf);
+                }
+            }
+            uint8_t eth_mac_bytes[6];
+            eth_uplink_get_mac(eth_mac_bytes);
+            snprintf(mac_str, sizeof mac_str,
+                     "%02x:%02x:%02x:%02x:%02x:%02x",
+                     eth_mac_bytes[0], eth_mac_bytes[1], eth_mac_bytes[2],
+                     eth_mac_bytes[3], eth_mac_bytes[4], eth_mac_bytes[5]);
+            cJSON_AddStringToObject(eth, "mac", mac_str);
+
+            /* DNS — mirrors the STA block above. eth_uplink.c only tracks
+             * IP/mask/GW itself, not DNS, so read it straight off the ETH
+             * netif the same way STA does; this was simply missing before,
+             * which is why the ETH card never showed a resolver at all. */
+            esp_netif_t *eth_if = esp_netif_get_handle_from_ifkey("ETH_DEF");
+            if (eth_if) {
+                esp_netif_dns_info_t eth_dns = {0};
+                if (esp_netif_get_dns_info(eth_if, ESP_NETIF_DNS_MAIN, &eth_dns) == ESP_OK
+                    && eth_dns.ip.u_addr.ip4.addr) {
+                    char dbuf[16];
+                    ip4_to_str(eth_dns.ip.u_addr.ip4.addr, dbuf, sizeof dbuf);
+                    cJSON_AddStringToObject(eth, "dns", dbuf);
+                }
+            }
+        }
+        /* Wire-byte counters — reported unconditionally (not only while
+         * connected) so a link that has since dropped still shows what it
+         * carried. Zero until netif_hooks_init() has hooked the ETH netif. */
+        cJSON_AddNumberToObject(eth, "bytes_in",  (double)netif_hooks_get_eth_bytes_in());
+        cJSON_AddNumberToObject(eth, "bytes_out", (double)netif_hooks_get_eth_bytes_out());
+        /* Subnet routing toggle and last-detected CIDR for the Status card. */
+        cJSON_AddBoolToObject(eth, "route_en", eth_route_en != 0);
+        char *eth_cidr_nv = nvs_param_get_str("eth_route_cidr");
+        if (eth_cidr_nv && eth_cidr_nv[0])
+            cJSON_AddStringToObject(eth, "route_cidr", eth_cidr_nv);
+        free(eth_cidr_nv);
+        cJSON_AddItemToObject(root, "eth", eth);
+    }
 
     /* AP (downlink) — SSID + channel from live wifi_config, MAC, clients, IP. */
     cJSON *ap = cJSON_CreateObject();
@@ -2634,7 +2714,7 @@ static esp_err_t tailscale_handler(httpd_req_t *req)
         cJSON_AddNumberToObject(settings, "peerapi_port",      TAILSCALE_PEERAPI_PORT);
     }
     {
-        const char *eff = tailscale_advertise_routes_effective();
+        const char *eff = tailscale_compose_routes();
         cJSON_AddStringToObject(settings, "effective_routes", eff ? eff : "");
     }
     {
@@ -4720,6 +4800,251 @@ static const httpd_uri_t uri_sdlog_erase = {
     .uri = "/api/sdlog/erase", .method = HTTP_POST, .handler = sdlog_erase_handler,
 };
 
+/* POST /api/eth-routing — {"enabled": bool, "cidr": "192.168.1.0/24"}
+ *
+ * Saves eth_route_en to NVS.  When enabling, an optional "cidr" override
+ * stores a specific CIDR in NVS "eth_route_cidr"; if omitted the previously
+ * auto-detected value is kept.  Restarts Tailscale so tailscale_compose_routes()
+ * picks up the new flag at the next connect.  ts_routes (manual) is never
+ * modified here. */
+/* Strictly parse an IPv4 CIDR "a.b.c.d/p" (p = 1..32, nothing trailing) and
+ * write its normalised network form (host bits cleared) to `out`. The
+ * override ends up in the newline-separated route list handed to microlink,
+ * so anything looser -- a newline smuggling in extra routes such as
+ * 0.0.0.0/0, or garbage that breaks control-plane registration -- must be
+ * rejected here. /0 is refused: a default route is what exit-node mode is
+ * for, not a LAN auto-route. */
+static bool cidr_normalize(const char *in, char *out, size_t out_size)
+{
+    unsigned a, b, c, d, pfx;
+    char tail;
+    if (!in || sscanf(in, "%3u.%3u.%3u.%3u/%2u%c", &a, &b, &c, &d, &pfx, &tail) != 5) {
+        return false;
+    }
+    if (a > 255 || b > 255 || c > 255 || d > 255 || pfx < 1 || pfx > 32) return false;
+    uint32_t ip   = (a << 24) | (b << 16) | (c << 8) | d;
+    uint32_t mask = 0xFFFFFFFFu << (32 - pfx);
+    ip &= mask;
+    snprintf(out, out_size, "%u.%u.%u.%u/%u",
+             (unsigned)(ip >> 24), (unsigned)(ip >> 16) & 0xFF,
+             (unsigned)(ip >> 8) & 0xFF, (unsigned)ip & 0xFF, pfx);
+    return true;
+}
+
+static esp_err_t eth_routing_handler(httpd_req_t *req)
+{
+    if (require_auth(req) != ESP_OK) return ESP_FAIL;
+
+    char *buf = malloc_body_buf(512);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    if (recv_body(req, buf, 512, NULL) != ESP_OK) { free(buf); return ESP_FAIL; }
+
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON");
+        return ESP_FAIL;
+    }
+
+    const cJSON *j_enabled = cJSON_GetObjectItem(root, "enabled");
+    const cJSON *j_cidr    = cJSON_GetObjectItem(root, "cidr");
+
+    /* Validate the optional override before changing any state, so a bad
+     * request leaves the current configuration exactly as it was. */
+    char cidr_norm[20] = "";
+    if (cJSON_IsString(j_cidr) && j_cidr->valuestring[0] &&
+        !cidr_normalize(j_cidr->valuestring, cidr_norm, sizeof cidr_norm)) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "cidr must be a.b.c.d/1-32");
+        return ESP_FAIL;
+    }
+
+    if (cJSON_IsBool(j_enabled)) {
+        uint8_t en = cJSON_IsTrue(j_enabled) ? 1 : 0;
+        eth_route_en = en;
+        nvs_param_set_u8("eth_route_en", en);
+
+        /* Optional CIDR override — persists a custom CIDR in NVS. */
+        if (en && cidr_norm[0]) {
+            nvs_param_set_str("eth_route_cidr", cidr_norm);
+            ESP_LOGI(TAG, "eth-routing ON — CIDR override %s", cidr_norm);
+        } else {
+            ESP_LOGI(TAG, "eth-routing %s", en ? "ON" : "OFF");
+        }
+
+        /* Restart Tailscale so tailscale_compose_routes() sees the new flag. */
+        if (tailscale_enabled) {
+            tailscale_connected = false;
+            xTaskCreate(tailscale_connect_task, "ts_connect", 4096, NULL, 5, NULL);
+        }
+    }
+
+    cJSON_Delete(root);
+
+    /* Return the new state so the SPA can update without an extra poll. */
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "route_en", eth_route_en != 0);
+    char *eth_cidr_nv = nvs_param_get_str("eth_route_cidr");
+    if (eth_cidr_nv && eth_cidr_nv[0])
+        cJSON_AddStringToObject(resp, "route_cidr", eth_cidr_nv);
+    free(eth_cidr_nv);
+    char *s = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_sendstr(req, s ? s : "{}");
+    free(s);
+    return ret;
+}
+static const httpd_uri_t uri_eth_routing = {
+    .uri = "/api/eth-routing", .method = HTTP_POST, .handler = eth_routing_handler,
+};
+
+/* POST /api/sta-routing — toggle auto-advertisement of the WiFi STA subnet.
+ * Body: {"enabled": true|false}
+ * Mirrors /api/eth-routing for the WiFi uplink interface. */
+static esp_err_t sta_routing_handler(httpd_req_t *req)
+{
+    if (require_auth(req) != ESP_OK) return ESP_FAIL;
+    char *buf = malloc_body_buf(512);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    if (recv_body(req, buf, 512, NULL) != ESP_OK) { free(buf); return ESP_FAIL; }
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON"); return ESP_FAIL; }
+
+    const cJSON *j_enabled = cJSON_GetObjectItem(root, "enabled");
+    if (cJSON_IsBool(j_enabled)) {
+        uint8_t en = cJSON_IsTrue(j_enabled) ? 1 : 0;
+        sta_route_en = en;
+        nvs_param_set_u8("sta_route_en", en);
+        /* When enabling, populate sta_route_cidr from the live STA netif so
+         * tailscale_compose_routes() sees a valid CIDR on the very next
+         * Tailscale restart without waiting for the next DHCP event.
+         * Without this the key is empty (never written when sta_route_en=0
+         * at boot) and the first restart silently advertises no routes. */
+        if (en) {
+            esp_netif_t *sta_nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+            if (sta_nif) {
+                esp_netif_ip_info_t sinfo = {0};
+                if (esp_netif_get_ip_info(sta_nif, &sinfo) == ESP_OK && sinfo.ip.addr) {
+                    uint32_t net = sinfo.ip.addr & sinfo.netmask.addr;
+                    int pfx = subnet_mask_prefix_len(sinfo.netmask.addr);
+                    if (pfx >= 0) {
+                        char netbuf[16], cidrbuf[27];
+                        ip4_to_str(net, netbuf, sizeof netbuf);
+                        snprintf(cidrbuf, sizeof cidrbuf, "%s/%u", netbuf, (unsigned)(pfx & 0x3f));
+                        nvs_param_set_str("sta_route_cidr", cidrbuf);
+                        ESP_LOGI(TAG, "sta-routing ON — CIDR %s", cidrbuf);
+                    } else {
+                        ESP_LOGI(TAG, "sta-routing ON — STA connected but CIDR deferred");
+                    }
+                } else {
+                    ESP_LOGI(TAG, "sta-routing ON — STA not connected yet, CIDR deferred to next DHCP");
+                }
+            }
+        } else {
+            ESP_LOGI(TAG, "sta-routing OFF");
+        }
+        if (tailscale_enabled) {
+            tailscale_connected = false;
+            xTaskCreate(tailscale_connect_task, "ts_connect", 4096, NULL, 5, NULL);
+        }
+    }
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "route_en", sta_route_en != 0);
+    char *sta_cidr_nv = nvs_param_get_str("sta_route_cidr");
+    if (sta_cidr_nv && sta_cidr_nv[0])
+        cJSON_AddStringToObject(resp, "route_cidr", sta_cidr_nv);
+    free(sta_cidr_nv);
+    char *s = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_sendstr(req, s ? s : "{}");
+    free(s);
+    return ret;
+}
+static const httpd_uri_t uri_sta_routing = {
+    .uri = "/api/sta-routing", .method = HTTP_POST, .handler = sta_routing_handler,
+};
+
+/* POST /api/wifi-uplink — master switch for using WiFi STA as an uplink.
+ * Body: {"enabled": true|false}
+ * Off is the default for a fresh device: this is primarily a wired router and
+ * an idle STA would otherwise scan indefinitely on the radio the AP shares.
+ * Applied live so the operator doesn't need to reboot — enabling associates
+ * immediately (when networks are configured), disabling tears the link down. */
+static esp_err_t wifi_uplink_handler(httpd_req_t *req)
+{
+    if (require_auth(req) != ESP_OK) return ESP_FAIL;
+    char *buf = malloc_body_buf(512);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    if (recv_body(req, buf, 512, NULL) != ESP_OK) { free(buf); return ESP_FAIL; }
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON"); return ESP_FAIL; }
+
+    const cJSON *j_enabled = cJSON_GetObjectItem(root, "enabled");
+    if (cJSON_IsBool(j_enabled)) {
+        uint8_t en = cJSON_IsTrue(j_enabled) ? 1 : 0;
+        ESP_LOGI(TAG, "wifi-uplink %s", en ? "ON" : "OFF");
+        sta_uplink_set(en);
+    }
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject  (resp, "uplink_en", sta_uplink_en != 0);
+    cJSON_AddNumberToObject(resp, "networks",  wifi_networks_count());
+    char *s = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_sendstr(req, s ? s : "{}");
+    free(s);
+    return ret;
+}
+static const httpd_uri_t uri_wifi_uplink = {
+    .uri = "/api/wifi-uplink", .method = HTTP_POST, .handler = wifi_uplink_handler,
+};
+
+/* POST /api/eth-uplink — master switch for using the wired W5500 as an
+ * uplink, mirroring /api/wifi-uplink above. Default ON (unlike WiFi's
+ * default off): this device is primarily a wired router, and a device
+ * upgrading from a firmware without this switch must keep working exactly
+ * as before — flipping the default here would silently drop every existing
+ * deployment's uplink on update. Applied live via eth_uplink_set_enabled():
+ * disabling stops the driver (no reboot needed), enabling restarts it. */
+static esp_err_t eth_uplink_handler(httpd_req_t *req)
+{
+    if (require_auth(req) != ESP_OK) return ESP_FAIL;
+    char *buf = malloc_body_buf(512);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    if (recv_body(req, buf, 512, NULL) != ESP_OK) { free(buf); return ESP_FAIL; }
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid JSON"); return ESP_FAIL; }
+
+    const cJSON *j_enabled = cJSON_GetObjectItem(root, "enabled");
+    if (cJSON_IsBool(j_enabled)) {
+        uint8_t en = cJSON_IsTrue(j_enabled) ? 1 : 0;
+        ESP_LOGI(TAG, "eth-uplink %s", en ? "ON" : "OFF");
+        eth_uplink_set_enabled(en);
+    }
+    cJSON_Delete(root);
+
+    cJSON *resp = cJSON_CreateObject();
+    cJSON_AddBoolToObject(resp, "uplink_en", eth_uplink_is_enabled());
+    char *s = cJSON_PrintUnformatted(resp);
+    cJSON_Delete(resp);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_sendstr(req, s ? s : "{}");
+    free(s);
+    return ret;
+}
+static const httpd_uri_t uri_eth_uplink = {
+    .uri = "/api/eth-uplink", .method = HTTP_POST, .handler = eth_uplink_handler,
+};
+
 /* The browser asks for /favicon.ico on every tab whatever the page declares,
  * and with nothing registered each request was a 404 plus a "URI not found"
  * WARN in the device log. The SPA carries the same icon inline (no request at
@@ -4785,7 +5110,7 @@ void web_ui_init(void)
      * instead of WebCrypto's ~100 ms. */
     httpd_config_t conf           = HTTPD_DEFAULT_CONFIG();
     conf.uri_match_fn             = httpd_uri_match_wildcard;
-    conf.max_uri_handlers         = 72;   /* 59 registered; reg_uri() logs if this runs out */
+    conf.max_uri_handlers         = 72;   /* 63 registered; reg_uri() logs if this runs out */
     conf.stack_size               = 12288;
     /* Without the mbedTLS context cost we can afford the bigger pool
      * the pre-HTTPS web server used. The SPA's first-paint opens 5-7
@@ -4859,6 +5184,10 @@ void web_ui_init(void)
     reg_uri(server, &uri_sdlog_download);
     reg_uri(server, &uri_sdlog_tail);
     reg_uri(server, &uri_sdlog_erase);
+    reg_uri(server, &uri_eth_routing);
+    reg_uri(server, &uri_sta_routing);
+    reg_uri(server, &uri_wifi_uplink);
+    reg_uri(server, &uri_eth_uplink);
     ESP_LOGI(TAG, "web UI listening on :%d (HTTP)", conf.server_port);
     /* HTTPS redirect server gone with HTTPS itself — direct HTTP-on-80
      * is now the only listener, so nothing to redirect anywhere. */

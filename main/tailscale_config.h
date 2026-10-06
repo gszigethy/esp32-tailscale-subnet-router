@@ -90,6 +90,13 @@ void tailscale_set_subnet(uint32_t ip, uint32_t mask);
 const char *tailscale_advertise_routes_effective(void);
 bool tailscale_in_subnet(uint32_t ip);
 
+/* W5500 fork: what is actually advertised. tailscale_advertise_routes_effective()
+ * (AP subnet + manual list) plus the per-interface auto-routes -- the wired
+ * ETH LAN when eth_route_en, the WiFi STA LAN when sta_route_en -- with
+ * duplicates dropped. Same contract as the upstream helper: newline-separated,
+ * NULL when nothing is advertised, static storage recomputed on every call. */
+const char *tailscale_compose_routes(void);
+
 #ifdef __cplusplus
 }
 #endif

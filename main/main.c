@@ -21,12 +21,15 @@
 #include "esp_wifi.h"
 #include "esp_eap_client.h"
 #include "esp_event.h"
+#include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_netif_net_stack.h"
 #include "esp_netif.h"
 #include "nvs_flash.h"
 #include "lwip/inet.h"
 #include "lwip/netdb.h"
+#include "lwip/dns.h"
+#include "lwip/tcpip.h"
 #include "lwip/sockets.h"
 #if IP_NAPT
 #include "lwip/lwip_napt.h"
@@ -53,6 +56,8 @@
 #include "wifi_networks.h"
 #include "dhcp_reservations.h"
 #include "portmap.h"
+#include "eth_uplink.h"
+#include "esp_eth.h"          /* ETH_EVENT for the link-down failover handler */
 #include "mac_deny.h"
 #include "reset_history.h"
 #include "ota.h"
@@ -112,10 +117,10 @@ static int s_retry_num = 0;
 /* FreeRTOS event group to signal when we are connected/disconnected */
 static EventGroupHandle_t s_wifi_event_group;
 
-/* Cross-module state. ap_connect tracks whether the upstream STA link
- * is up (telemetry waits for it before its first send); connect_count
- * is the live count of AP clients (rendered on the Status page and
- * reported in telemetry). */
+/* Cross-module state. ap_connect tracks whether ANY upstream uplink is up
+ * — WiFi STA or wired ETH (telemetry waits for it before its first send);
+ * connect_count is the live count of AP clients (rendered on the Status
+ * page and reported in telemetry). */
 /* volatile: telemetry.c's sender task spin-waits on ap_connect and the web
  * UI reads both from the httpd task, while the writers are WiFi event
  * handlers on another task. Without it the compiler is free to hoist the
@@ -124,10 +129,84 @@ static EventGroupHandle_t s_wifi_event_group;
 volatile int ap_connect   = 0;
 volatile int connect_count = 0;
 
+/* Per-uplink IP state. ap_connect is the OR of these two and must never be
+ * written directly: each uplink's events used to clear it as if they owned
+ * it, so a WiFi STA retry loop would zero the flag while ETH was happily
+ * leased (and vice versa), reporting a healthy router as degraded.
+ * sta_connect is read by web_ui.c so the WiFi card reflects WiFi only. */
+volatile int sta_connect = 0;
+/* Non-static: tailscale_compose_routes() advertises the ETH LAN only while
+ * the wired uplink actually holds a lease. */
+volatile int eth_connect = 0;
+
+static void uplink_state_changed(void)
+{
+    ap_connect = (sta_connect || eth_connect) ? 1 : 0;
+}
+
+/* Ask for a Tailscale (re)connect. Called whenever the path the tunnel runs
+ * over, or the set of advertised routes, changes. tailscale_connect_task
+ * coalesces requests (one in flight plus one queued), so a burst of uplink
+ * events costs at most one extra reconnect. */
+static void tailscale_kick(void)
+{
+    if (tailscale_enabled) {
+        xTaskCreate(tailscale_connect_task, "ts_connect", 4096, NULL, 5, NULL);
+    }
+}
+
+/* Hand the default route to the WiFi STA, if it holds a lease. ETH claims
+ * the default with esp_netif_set_default_netif(), which is a *manual*
+ * override: esp_netif will not re-select automatically while that netif
+ * still exists, even with its cable out. So every way ETH can go away
+ * (lost IP, link down, switched off) must move the default explicitly, or
+ * outbound traffic stays on a dead link while WiFi has a working lease. */
+static void default_route_to_sta(void)
+{
+    if (!sta_connect) return;
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (sta) esp_netif_set_default_netif(sta);
+}
+
+/* Per-interface subnet routing flags.
+ * eth_route_en: auto-advertise ETH LAN CIDR.  Default 1 — zero-touch on ETH hardware.
+ * sta_route_en: auto-advertise WiFi STA CIDR. Default 0 — opt-in, preserves original
+ *               WiFi-only behavior where routes are set manually via the Tailscale tab.
+ * The AP subnet is not here: it is advertised by default and controlled by the
+ * Tailscale card's "Advertise the AP subnet" switch (tailscale_advertise_ap,
+ * NVS ts_adv_ap) since upstream 0.1.24. */
+volatile uint8_t eth_route_en = 1;
+volatile uint8_t sta_route_en = 0;
+
+/* WiFi STA uplink master switch. This device is primarily a drop-in wired
+ * Tailscale router: Ethernet is the primary uplink, the AP exists for
+ * provisioning, and WiFi-as-uplink is an opt-in secondary. Default off, so an
+ * unprovisioned board doesn't sit in a permanent association-retry loop
+ * against the Kconfig placeholder SSID — that scanning contends for the single
+ * shared 2.4 GHz radio the AP is using. Loaded at boot in app_main. */
+volatile uint8_t sta_uplink_en = 0;
+
 /* Forward declarations — definitions land further down in this file. */
 /* Non-static — also called from web_ui.c when DNS-relay state changes,
  * so the new DHCP-offered DNS takes effect immediately for new leases. */
 void softap_set_dns_addr(esp_netif_t *esp_netif_ap, esp_netif_t *esp_netif_sta);
+static void ap_refresh_uplink_dns(void);
+ESP_EVENT_DEFINE_BASE(AP_DNS_EVENT);
+
+static void ap_dns_refresh_event(void *arg, esp_event_base_t base,
+                                 int32_t id, void *data)
+{
+    ap_refresh_uplink_dns();
+}
+
+static void ap_dns_poll(void *arg)
+{
+    /* The default event loop serializes DNS refresh with uplink events.
+     * Never block the timer/relay task; the next poll retries a full queue. */
+    esp_event_post(AP_DNS_EVENT, 0, NULL, 0, 0);
+}
+/* Used by both wifi_event_handler (STA got-IP) and eth_ip_event_handler. */
+static void cidr_from_dhcp_event(const ip_event_got_ip_t *ev, char *out, size_t out_size);
 
 /* Override the weak dns_relay_on_healthy hook so the moment the relay
  * task finishes its boot-delay + bind cycle, the DHCP-offered DNS
@@ -136,11 +215,57 @@ void softap_set_dns_addr(esp_netif_t *esp_netif_ap, esp_netif_t *esp_netif_sta);
 static void dns_relay_state_cb(bool healthy)
 {
     (void)healthy;
-    esp_netif_t *ap  = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    ESP_LOGI(TAG_AP, "DNS relay state changed → healthy=%d — reapplying softap DNS",
-             (int)healthy);
-    if (ap && sta) softap_set_dns_addr(ap, sta);
+    ap_dns_poll(NULL);
+}
+
+static void uplink_resolvers_cb(void *ctx)
+{
+    const esp_netif_dns_info_t *resolvers = ctx;
+    for (int i = 0; i < 2; ++i) {
+        ip_addr_t addr;
+        IP_SET_TYPE_VAL(addr, IPADDR_TYPE_V4);
+        ip4_addr_set_u32(ip_2_ip4(&addr), resolvers[i].ip.u_addr.ip4.addr);
+        dns_setserver(i, &addr);
+    }
+}
+
+/* Match the physical uplink policy: leased Ethernet takes precedence over
+ * leased STA. Use the application's state, updated before this call, rather
+ * than the Ethernet status cache, whose event handler runs separately.
+ * A NULL source still applies relay/custom DNS or the public fallback. */
+static void ap_refresh_uplink_dns(void)
+{
+    esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    /* Use the active uplink for the DNS source, not a hardcoded STA lookup.
+     * When ETH is the primary uplink and WiFi STA is not connected, looking
+     * up WIFI_STA_DEF would yield a netif with no DNS and cause
+     * softap_set_dns_addr to fall through to the 1.1.1.1 hardcoded
+     * fallback, hiding the router's upstream resolver from AP clients. */
+    esp_netif_t *uplink = NULL;
+#ifdef CONFIG_ETH_W5500_ENABLED
+    if (eth_connect)
+        uplink = esp_netif_get_handle_from_ifkey("ETH_DEF");
+#endif
+    if (!uplink && sta_connect)
+        uplink = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    /* DHCP startup can clear lwIP's global resolver slots even for a standby
+     * interface. Per-netif storage also changes on DNS-only renewals. Keep
+     * firmware resolution aligned without reasserting the default route
+     * (which could undo exit-node routing), independently of AP overrides. */
+    esp_netif_dns_info_t resolvers[2] = {0};
+    if (uplink) {
+        esp_netif_get_dns_info(uplink, ESP_NETIF_DNS_MAIN, &resolvers[0]);
+        esp_netif_get_dns_info(uplink, ESP_NETIF_DNS_BACKUP, &resolvers[1]);
+    }
+    if (!resolvers[0].ip.u_addr.ip4.addr) {
+        ip4_addr_t fallback;
+        ip4addr_aton("1.1.1.1", &fallback);
+        resolvers[0].ip.u_addr.ip4.addr = fallback.addr;
+    }
+    if (tcpip_callback_wait(uplink_resolvers_cb, resolvers) != ERR_OK) {
+        ESP_LOGW(TAG_AP, "could not refresh firmware uplink DNS");
+    }
+    if (ap) softap_set_dns_addr(ap, uplink);
 }
 
 /* Multi-network rotation state. Index 0 is preferred; on association
@@ -284,6 +409,35 @@ static void wifi_apply_network(int idx)
     }
 }
 
+/* Apply a WiFi-uplink enable/disable at runtime, so the operator doesn't have
+ * to reboot after flipping the switch. Lives here rather than in web_ui.c
+ * because it needs wifi_apply_network() and the rotation counters, which are
+ * private to this file. Persists the choice, then makes the radio match it. */
+void sta_uplink_set(uint8_t enable)
+{
+    uint8_t was = sta_uplink_en;
+    sta_uplink_en = enable ? 1 : 0;
+    nvs_param_set_u8("sta_uplink_en", sta_uplink_en);
+    if (sta_uplink_en == was) return;
+
+    if (sta_uplink_en) {
+        /* wifi_init_sta() deliberately installed no credentials while the
+         * uplink was off, so push slot 0 in before asking to associate. */
+        if (wifi_networks_count() > 0) {
+            s_net_current = 0;
+            s_net_retries = 0;
+            wifi_apply_network(0);
+            esp_wifi_connect();
+            ESP_LOGI(TAG_STA, "uplink enabled — associating");
+        } else {
+            ESP_LOGW(TAG_STA, "uplink enabled but no networks configured");
+        }
+    } else {
+        esp_wifi_disconnect();
+        ESP_LOGI(TAG_STA, "uplink disabled — disconnecting");
+    }
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
@@ -310,10 +464,25 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                  MAC2STR(event->mac), event->aid, event->reason);
         if (connect_count > 0) connect_count--;
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-        ESP_LOGI(TAG_STA, "Station started");
+        if (sta_uplink_en) {
+            esp_wifi_connect();
+            ESP_LOGI(TAG_STA, "Station started");
+        } else {
+            ESP_LOGI(TAG_STA, "Station started — uplink disabled, not associating");
+        }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        ap_connect = 0;
+        bool sta_was_up = sta_connect;
+        sta_connect = 0;
+        uplink_state_changed();
+        if (sta_was_up) ap_refresh_uplink_dns();
+        /* With ETH carrying the tunnel, a lost STA only matters if its subnet
+         * was advertised: reconnect so the stale route is withdrawn. (Fires
+         * on every retry, hence only on the up -> down transition.) */
+        if (sta_was_up && eth_connect && sta_route_en) tailscale_kick();
+        /* Uplink switched off (or never on): stop here. Without this the
+         * handler's own esp_wifi_connect() below turns a single disconnect
+         * into an endless retry loop that keeps the radio scanning. */
+        if (!sta_uplink_en) return;
         /* Multi-network rotation: stay on the current SSID for
          * WIFI_RETRIES_PER_NETWORK association attempts, then roll
          * forward to the next configured slot. Single-network setups
@@ -334,7 +503,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG_STA, "Got IP:" IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
         s_net_retries = 0;   /* successful association — clear the rotation counter */
-        ap_connect = 1;
+        bool sta_was_up = sta_connect;
+        sta_connect = 1;
+        uplink_state_changed();
+        /* Without a wired lease the STA is the uplink: take the default route
+         * back from a manual ETH override that may still be in place. */
+        if (!eth_connect) default_route_to_sta();
 
         /* Single radio: the softAP always sits on the STA's channel -- the
          * WiFi driver moves it there itself whenever the STA (re)connects,
@@ -373,12 +547,29 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                          (unsigned)prim, (unsigned)ap_info.primary);
             }
         }
-        /* Auto-spawn the Tailscale (microlink) connect task once STA has
-         * an IP — same trigger point as the old repo. The task is
-         * responsible for waiting on SNTP, dialing the control plane and
-         * staying online; we just kick it off here. */
-        if (tailscale_enabled) {
-            xTaskCreate(tailscale_connect_task, "ts_connect", 4096, NULL, 5, NULL);
+        /* Cache the STA subnet CIDR so tailscale_compose_routes() can include
+         * it when sta_route_en=1.  Only on ip_changed to avoid NVS wear on
+         * stable same-address renewals.  The manual ts_routes textarea is
+         * unaffected — this only updates "sta_route_cidr". */
+        if (sta_route_en && event->ip_changed) {
+            char new_cidr[20];
+            cidr_from_dhcp_event(event, new_cidr, sizeof new_cidr);
+            char *old_cidr = nvs_param_get_str("sta_route_cidr");
+            if (!old_cidr || !old_cidr[0] || strcmp(old_cidr, new_cidr) != 0) {
+                ESP_LOGI(TAG_STA, "STA subnet %s — cached for tailnet route composition", new_cidr);
+                nvs_param_set_str("sta_route_cidr", new_cidr);
+            }
+            free(old_cidr);
+        }
+
+        /* (Re)connect Tailscale once STA has an IP. When the STA is the
+         * uplink this runs on every got-IP, as upstream does: a drop, roam or
+         * address change leaves microlink on a dead path otherwise. When ETH
+         * carries the tunnel, leave it alone unless it isn't up yet, or the
+         * STA subnet is advertised and has just appeared or changed. */
+        if (!eth_connect || !tailscale_connected ||
+            (sta_route_en && (!sta_was_up || event->ip_changed))) {
+            tailscale_kick();
         }
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
 
@@ -386,14 +577,125 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
          * clients can resolve names through us. Runs every time we
          * (re-)acquire an STA IP — DNS may have changed on the new
          * uplink, and DHCP server restart is idempotent. */
-        esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-        esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-        if (ap && sta) softap_set_dns_addr(ap, sta);
+        ap_refresh_uplink_dns();
 
         /* Re-bind the NAPT portmap entries to the freshly-acquired
          * STA IP. portmap_install_all is idempotent — duplicate bindings
          * are cleared before the re-add. */
         portmap_install_all();
+    }
+}
+
+/* Compute the network CIDR from a DHCP got-IP event.
+ * Works for any interface (ETH or STA) — the ip_event_got_ip_t struct is
+ * identical for IP_EVENT_ETH_GOT_IP and IP_EVENT_STA_GOT_IP.
+ * The netmask is in network byte order; __builtin_popcount derives the prefix
+ * length correctly regardless of byte order for contiguous masks. */
+static void cidr_from_dhcp_event(const ip_event_got_ip_t *ev,
+                                 char *out, size_t out_size)
+{
+    uint32_t net = ev->ip_info.ip.addr & ev->ip_info.netmask.addr;
+    int pfx = __builtin_popcount(ev->ip_info.netmask.addr);
+    ip4_addr_t n = { .addr = net };
+    snprintf(out, out_size, IPSTR "/%d", IP2STR(&n), pfx);
+}
+
+/* Ethernet uplink got-IP event handler.
+ *
+ * Mirrors IP_EVENT_STA_GOT_IP: marks the uplink as up, spawns the Tailscale
+ * connect task (if not already running), copies the DHCP-learned DNS into the
+ * AP-side DHCP server, and re-binds portmap rules to the new IP.
+ *
+ * No channel-realign logic here — that single-radio constraint is WiFi-only.
+ */
+/* ETH is no longer usable (lost IP, link down or switched off). Once per
+ * up -> down transition: clear its state, move the default route to the STA
+ * if that has a lease, and reconnect Tailscale so the tunnel follows and the
+ * ETH LAN is withdrawn from the advertised routes. */
+static void eth_uplink_went_down(const char *why)
+{
+    if (!eth_connect) return;
+    ESP_LOGI("ETH", "uplink down (%s)", why);
+    eth_connect = 0;
+    uplink_state_changed();
+    default_route_to_sta();
+    ap_refresh_uplink_dns();
+    tailscale_kick();
+    portmap_install_all();   /* re-bind forwards to the remaining uplink */
+}
+
+static void eth_ip_event_handler(void *arg, esp_event_base_t event_base,
+                                  int32_t event_id, void *event_data)
+{
+    if (event_base != IP_EVENT) return;
+
+    if (event_id == IP_EVENT_ETH_GOT_IP) {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI("ETH", "Got IP:" IPSTR, IP2STR(&event->ip_info.ip));
+        bool eth_was_up = eth_connect;
+        eth_connect = 1;
+        uplink_state_changed();
+
+        /* Promote ETH to the default route now that it has a valid DHCP
+         * lease.  Doing this here (not at eth_uplink_init() time) guarantees
+         * lwIP's routing table already has an ETH entry when the preference
+         * is set, and avoids pointing the default route at an interface with
+         * no IP during the boot window when the cable may not be connected. */
+        esp_netif_t *eth = esp_netif_get_handle_from_ifkey("ETH_DEF");
+        if (eth) esp_netif_set_default_netif(eth);
+
+        /* Cache ETH LAN CIDR for tailscale_compose_routes().
+         * Only on ip_changed (first lease or address change) so stable
+         * same-IP renewals never interrupt a live Tailscale session.
+         * NVS "eth_route_cidr" is read by tailscale_compose_routes() at
+         * connect time when eth_route_en=1; ts_routes (user manual) is
+         * never modified automatically. */
+        if (eth_route_en && event->ip_changed) {
+            char new_cidr[20];   /* "255.255.255.255/32\0" fits in 19 chars */
+            cidr_from_dhcp_event(event, new_cidr, sizeof new_cidr);
+            char *old_cidr = nvs_param_get_str("eth_route_cidr");
+            bool subnet_changed = !old_cidr || !old_cidr[0]
+                                  || strcmp(old_cidr, new_cidr) != 0;
+            free(old_cidr);
+            if (subnet_changed) {
+                ESP_LOGI("ETH", "ETH LAN subnet %s — cached for tailnet route composition", new_cidr);
+                nvs_param_set_str("eth_route_cidr", new_cidr);
+            }
+        }
+
+        /* Restart Tailscale when ETH has just come up (first lease, cable
+         * back, switched back on) or its address changed: the tunnel moves
+         * onto the wired path and the ETH LAN is advertised again. Stable
+         * same-address renewals leave a live session alone. ip_changed is
+         * false when the link returns with the same lease, hence eth_was_up. */
+        if (!eth_was_up || event->ip_changed) {
+            tailscale_connected = false;
+            tailscale_kick();
+        } else if (!tailscale_connected) {
+            tailscale_kick();
+        }
+
+        /* Copy the upstream (Ethernet) DNS into the AP-side DHCP options. */
+        ap_refresh_uplink_dns();
+
+        /* Re-bind any portmap entries to the freshly-acquired Ethernet IP. */
+        portmap_install_all();
+
+    } else if (event_id == IP_EVENT_ETH_LOST_IP) {
+        eth_uplink_went_down("lost IP");
+    }
+}
+
+/* Link down and driver stop arrive long before IP_EVENT_ETH_LOST_IP (which
+ * waits out CONFIG_NETIF_IP_LOST_TIMER_INTERVAL), so fail over on those. */
+static void eth_link_event_handler(void *arg, esp_event_base_t event_base,
+                                   int32_t event_id, void *event_data)
+{
+    if (event_base != ETH_EVENT) return;
+    if (event_id == ETHERNET_EVENT_DISCONNECTED) {
+        eth_uplink_went_down("link down");
+    } else if (event_id == ETHERNET_EVENT_STOP) {
+        eth_uplink_went_down("stopped");
     }
 }
 
@@ -404,6 +706,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 esp_netif_t *wifi_init_softap(void)
 {
     esp_netif_t *esp_netif_ap = esp_netif_create_default_wifi_ap();
+    /* Configure the offer once, before AP startup. Runtime DNS updates use
+     * esp_netif_set_dns_info and preserve DHCP's lease table. */
+    uint8_t offer_dns = DHCPS_OFFER_DNS;
+    ESP_ERROR_CHECK(esp_netif_dhcps_option(esp_netif_ap, ESP_NETIF_OP_SET,
+                    ESP_NETIF_DOMAIN_NAME_SERVER, &offer_dns, sizeof offer_dns));
 
     /* Optional AP-side IP override. Empty NVS keys → keep the default
      * 192.168.4.1/24. When both are set and parse cleanly we stop the
@@ -525,6 +832,16 @@ esp_netif_t *wifi_init_sta(void)
     }
     free(nvs_hostname);
 
+    /* Uplink disabled: leave the STA netif created (the AP DNS copy, ACL
+     * hooks and route composition all reference it) but install no
+     * credentials and never associate. Returning early also avoids writing
+     * the Kconfig placeholder SSID into the driver, which is what used to
+     * leave an unprovisioned board scanning forever. */
+    if (!sta_uplink_en) {
+        ESP_LOGI(TAG_STA, "wifi_init_sta: WiFi uplink disabled — AP-only, not associating");
+        return esp_netif_sta;
+    }
+
     if (wifi_networks_count() > 0) {
         ESP_LOGI(TAG_STA, "wifi_init_sta: %d network(s) configured, starting with slot 0",
                  wifi_networks_count());
@@ -585,7 +902,6 @@ void softap_set_dns_addr(esp_netif_t *esp_netif_ap,esp_netif_t *esp_netif_sta)
             dns.ip.type = ESP_IPADDR_TYPE_V4;
             dns.ip.u_addr.ip4.addr = ap_ip.ip.addr;
             used_override = true;
-            ESP_LOGI(TAG_AP, "DNS relay ON — DHCP advertises AP IP as resolver");
         }
     }
     if (!used_override) {
@@ -600,7 +916,7 @@ void softap_set_dns_addr(esp_netif_t *esp_netif_ap,esp_netif_t *esp_netif_sta)
         }
         free(ap_dns_str);
     }
-    if (!used_override) {
+    if (!used_override && esp_netif_sta) {
         esp_netif_get_dns_info(esp_netif_sta, ESP_NETIF_DNS_MAIN, &dns);
     }
     if (dns.ip.u_addr.ip4.addr == 0) {
@@ -610,11 +926,13 @@ void softap_set_dns_addr(esp_netif_t *esp_netif_ap,esp_netif_t *esp_netif_sta)
         dns.ip.u_addr.ip4.addr = a.addr;
     }
 
-    uint8_t dhcps_offer_option = DHCPS_OFFER_DNS;
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_dhcps_stop(esp_netif_ap));
-    ESP_ERROR_CHECK(esp_netif_dhcps_option(esp_netif_ap, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &dhcps_offer_option, sizeof(dhcps_offer_option)));
-    ESP_ERROR_CHECK(esp_netif_set_dns_info(esp_netif_ap, ESP_NETIF_DNS_MAIN, &dns));
-    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_dhcps_start(esp_netif_ap));
+    esp_netif_dns_info_t current = {0};
+    if (esp_netif_get_dns_info(esp_netif_ap, ESP_NETIF_DNS_MAIN, &current) == ESP_OK &&
+        current.ip.type == dns.ip.type &&
+        current.ip.u_addr.ip4.addr == dns.ip.u_addr.ip4.addr) return;
+    /* ESP-IDF updates the server DNS in TCP/IP context without stopping it.
+     * A stop/start clears leases and can reissue an address still in use. */
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_set_dns_info(esp_netif_ap, ESP_NETIF_DNS_MAIN, &dns));
 
     if (used_override) {
         ESP_LOGI(TAG_AP, "AP DHCP-offered DNS = %u.%u.%u.%u (operator override)",
@@ -635,6 +953,8 @@ void app_main(void)
 {
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_ERROR_CHECK(esp_event_handler_register(AP_DNS_EVENT, ESP_EVENT_ANY_ID,
+                    ap_dns_refresh_event, NULL));
 
     //Initialize NVS
     esp_err_t ret = nvs_flash_init();
@@ -732,6 +1052,36 @@ void app_main(void)
      * once WiFi STA has an IP. */
     tailscale_init();
 
+    /* Per-interface subnet routing flags — loaded once at boot.
+     * eth_route_en defaults 1 (zero-touch on ETH hardware).
+     * sta_route_en defaults 0 (opt-in for WiFi-only compat). */
+    {
+        uint8_t v = 1;
+        nvs_param_get_u8("eth_route_en", &v);
+        eth_route_en = v;
+    }
+    {
+        uint8_t v = 0;
+        nvs_param_get_u8("sta_route_en", &v);
+        sta_route_en = v;
+    }
+
+    /* WiFi STA uplink switch. Absent key = never configured, so derive the
+     * default instead of forcing one: a board that already has saved WiFi
+     * networks was provisioned as a WiFi router and must keep working across
+     * an update, while a fresh board gets the wired-first default. Any
+     * explicit operator choice is stored and wins from then on. */
+    {
+        uint8_t v = 0;
+        if (nvs_param_get_u8("sta_uplink_en", &v) == ESP_OK) {
+            sta_uplink_en = v ? 1 : 0;
+        } else {
+            sta_uplink_en = (wifi_networks_count() > 0) ? 1 : 0;
+            ESP_LOGI("main", "sta_uplink_en unset — defaulting to %s (%d saved network(s))",
+                     sta_uplink_en ? "on" : "off", wifi_networks_count());
+        }
+    }
+
     /* MTU / MSS clamp / PMTU manager. Owns the wg netif MTU plus the AP
      * hook clamp values. Loads NVS now; the 30 s poll timer takes over
      * once microlink + the wg netif exist. */
@@ -800,6 +1150,8 @@ void app_main(void)
     /* Initialize AP */
     ESP_LOGI(TAG_AP, "ESP_WIFI_MODE_AP");
     esp_netif_t *esp_netif_ap = wifi_init_softap();
+    /* Apply custom/fallback DNS even when neither uplink ever acquires IP. */
+    ap_refresh_uplink_dns();
 
     /* Tell the DNS relay which IP to bind on (the freshly-configured
      * AP IP). The relay task watches this and (re-)binds on change. */
@@ -816,6 +1168,16 @@ void app_main(void)
 
     /* Start WiFi */
     ESP_ERROR_CHECK(esp_wifi_start() );
+
+    /* DNS-only DHCP renewals do not emit got-IP. Refresh periodically so
+     * changes to a leased interface's resolver still reach AP DHCP. */
+    const esp_timer_create_args_t dns_poll_args = {
+        .callback = ap_dns_poll,
+        .name = "ap_dns_poll",
+    };
+    esp_timer_handle_t dns_poll_timer;
+    ESP_ERROR_CHECK(esp_timer_create(&dns_poll_args, &dns_poll_timer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(dns_poll_timer, 5000000));
 
     /* Optional TX-power override. NVS "tx_pwr" is a u8 in 0.25 dBm
      * steps (matches esp_wifi_set_max_tx_power): valid range is 8..84
@@ -837,9 +1199,36 @@ void app_main(void)
      * has moved into the IP_EVENT_STA_GOT_IP handler so it still
      * runs whenever the uplink (re-)acquires an address. */
 
-    /* STA is still the preferred default route for outgoing traffic
-     * once it has an address; before that, the AP netif stays default. */
+    /* STA is the initial default route; eth_ip_event_handler promotes ETH
+     * to default once it acquires a DHCP lease, ensuring lwIP's routing
+     * table has a valid ETH route before the preference is changed. */
     esp_netif_set_default_netif(esp_netif_sta);
+
+#ifdef CONFIG_ETH_W5500_ENABLED
+    /* W5500 Ethernet uplink — preferred over WiFi STA when present.
+     * eth_uplink_init() returns NULL gracefully if the hardware is absent,
+     * leaving WiFi-only operation unchanged.  Default-netif promotion is
+     * deferred to IP_EVENT_ETH_GOT_IP (see eth_ip_event_handler). */
+    esp_netif_t *eth_netif = eth_uplink_init();
+    if (eth_netif) {
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                        IP_EVENT_ETH_GOT_IP,
+                        &eth_ip_event_handler,
+                        NULL, NULL));
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                        IP_EVENT_ETH_LOST_IP,
+                        &eth_ip_event_handler,
+                        NULL, NULL));
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(ETH_EVENT,
+                        ETHERNET_EVENT_DISCONNECTED,
+                        &eth_link_event_handler,
+                        NULL, NULL));
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(ETH_EVENT,
+                        ETHERNET_EVENT_STOP,
+                        &eth_link_event_handler,
+                        NULL, NULL));
+    }
+#endif
 
     /* Enable napt on the AP netif */
     if (esp_netif_napt_enable(esp_netif_ap) != ESP_OK) {

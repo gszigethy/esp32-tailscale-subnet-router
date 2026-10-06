@@ -107,9 +107,17 @@ void portmap_install_all(void)
 
     /* Pull the current STA IP — without it the NAPT bind has nothing to
      * tie the external side to. Skip silently when STA isn't up yet;
-     * we'll be called again from IP_GOT_IP. */
-    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+     * we'll be called again from IP_GOT_IP.
+     * W5500 fork: bind to the wired uplink while it holds an address (it
+     * is the preferred uplink and the default route), else the STA. lwIP
+     * keeps one binding per (proto, port) and rewrites replies to that
+     * address, so it must be the uplink inbound traffic arrives on. main.c
+     * re-runs this on every uplink up/down transition. */
     esp_netif_ip_info_t ip_info = {0};
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("ETH_DEF");
+    if (!sta || esp_netif_get_ip_info(sta, &ip_info) != ESP_OK || !ip_info.ip.addr) {
+        sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    }
     if (!sta || esp_netif_get_ip_info(sta, &ip_info) != ESP_OK || !ip_info.ip.addr) {
         ESP_LOGI(TAG, "STA has no IP yet; deferring portmap install");
         return;
@@ -130,6 +138,6 @@ void portmap_install_all(void)
                        s_table[i].int_ip,
                        s_table[i].int_port);
     }
-    ESP_LOGI(TAG, "installed %d portmap(s) on STA " IPSTR,
-             s_count, IP2STR(&ip_info.ip));
+    ESP_LOGI(TAG, "installed %d portmap(s) on %s " IPSTR,
+             s_count, esp_netif_get_ifkey(sta), IP2STR(&ip_info.ip));
 }
