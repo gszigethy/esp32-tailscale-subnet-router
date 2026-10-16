@@ -6,6 +6,17 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.35-beta1+W5500] - 2026-10-16
+
+### From upstream
+- Updates the W5500 fork to upstream v0.1.35: WireGuard nonce lock, Noise bounds checks, immediate dead-control-session detection (0.1.35); relay TLS verification, WireGuard protocol fixes, measured relay region (0.1.34); WiFi power save switch (0.1.33); tunnel throughput and hand-typed default route fixes (0.1.32).
+
+### Fork changes
+- Keeps the fork's periodic AP DNS refresh alongside upstream's WiFi power save setting.
+
+### Validation
+- Prerelease; device confirmation of OTA, wired uplink, tunnel, and exit-node hosting is required before stable promotion.
+
 ## [0.1.31+W5500] - 2026-10-06
 
 ### Released
@@ -27,6 +38,51 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Validation
 - Prerelease; device confirmation of OTA, wired uplink, tunnel, and exit-node hosting is required before stable promotion.
+
+
+## [0.1.35] — 2026-10-13
+
+Two security fixes and a control-plane fix, all in microlink, from the second pass over the other maintained microlink forks (TimelyToga, TailTiny). Two tasks could encrypt WireGuard packets under the same nonce; the coordinator's Noise handshake reply was not bounds-checked; and a control session the server had closed went unnoticed until the 120 s watchdog, which showed the node offline in the admin console for up to two minutes at each connection rotation. Device-tested before tagging on the WiFi-only reference router: manual OTA; A/B/A throughput against 0.1.34 with no difference; an official client (Tailscale 1.102 on Linux) using the router as exit node; using an exit node with LAN bypass from an AP client; no spurious control reconnect over the rounds; the web endpoints; peers direct.
+
+### Security
+- **Two tasks can no longer encrypt WireGuard packets under the same nonce** (microlink, wireguard-lwip). Transport packets are encrypted from the TCP/IP thread (forwarded traffic) and from the WireGuard manager task (keepalives from the receive path and the periodic timer). The send counter is the AEAD nonce; two packets reading it before either incremented it would have been encrypted under the same nonce, which breaks ChaCha20-Poly1305. One mutex now covers "read counter, encrypt, increment". Found in the TimelyToga fork.
+- **The coordinator's Noise handshake reply is bounds-checked** (microlink). The reply's 3-byte header was read into a buffer that could be 1–2 bytes long, and a reply longer than the 48 bytes the Noise IK pattern allows was decrypted into a null buffer. Both are refused now. Found in the TimelyToga fork.
+
+### Fixed
+- **A dead control connection is noticed at once instead of after the 120 s watchdog** (microlink). A server GOAWAY, an RST_STREAM or END_STREAM on the map session, and an orderly close of the socket (which recv() reports with a stale errno) were skipped like any unknown frame, so the router stayed on a dead session until the watchdog fired and the admin console showed it offline for up to two minutes each time the control server rotated connections. Each case now triggers the reconnect immediately. The TailTiny fork found the same (upstream #40).
+
+## [0.1.34] — 2026-10-13
+
+A security fix and three protocol fixes, all in microlink, found by comparing notes with the other maintained microlink forks (eikopf, TimelyToga, TailTiny, Garionhk) and reading wireguard-go and magicsock. The relay (DERP) connection now verifies the relay's TLS certificate, as the coordinator connection always has; WireGuard anti-replay, key lifetimes and handshake state follow the protocol; the relay region is the one measured closest (the measurement was wrong, so the selection had been off) and the tailnet comes up about 10 s sooner after boot; WireGuard packets go only to a DISCO-confirmed address or over the relay. Device-tested before tagging on the WiFi-only reference router: manual OTA; the relay refused when its name resolves to a self-signed certificate and connecting again once it resolves correctly; a 4-minute tunnel soak through rekeys without loss; three A/B reboots against 0.1.33 with the same session start; the relay region moved back to Frankfurt from a forced New York default; an official client (Tailscale 1.102 on Linux) using the router as exit node downloads 5 MB in 9 s (4.6 Mbit/s, 5.1 on four connections); using an exit node with LAN bypass from an AP client; the web endpoints; peers direct.
+
+### Security
+- **The relay (DERP) connection now verifies the relay's TLS certificate** (microlink). The coordinator connection has always been checked against the ESP-IDF CA bundle; the DERP connection was opened with verification off, so anyone on the path could terminate the TLS session and read the relay protocol (who talks to whom, discovery messages, WireGuard handshakes; the WireGuard payload inside stays encrypted). The relay's certificate is now checked against the same CA bundle and the DERP node's name, with the two DERPMap knobs the official client honours: `CertName` (check against this name instead of `HostName`) and `InsecureForTests` (verification off for that node). Device-tested with the relay's name pointed at a self-signed certificate: every attempt is refused (`certificate of derp4i.tailscale.com rejected ... not signed by a trusted CA`), nothing connects, and the real relay connects as before once the name resolves correctly again. A Headscale with its embedded relay behind a self-signed certificate will now be refused the same way the official client refuses it. Found by comparing notes with the TimelyToga and eikopf microlink forks.
+
+### Fixed
+- **WireGuard transport and handshake state are checked the way the protocol specifies** (microlink, wireguard-lwip). A data packet's counter is now validated against the anti-replay window right after authentication and before any peer state is updated, keepalives included; the window arithmetic keeps the full 64-bit counter difference (a jump beyond 2^32 used to wrap and let an old counter back in), and a counter at the rejection limit is refused before decryption. The previous and next transport keys now expire on their own clocks (180 s), not only the current one; an unfinished handshake is erased after 540 s together with its cookie state; the session-index allocator stops at the first collision instead of letting a later peer mask it; the per-peer initiation rate limiter measured time backwards and never fired, and it now lets the first initiation after boot through; the receive path no longer requires our own send counter to be below the limit; and a decrypted packet shorter than an IP header is dropped before its header is read. X25519 clears bit 255 of the input coordinate as RFC 7748 requires (the aligned copy was made and then ignored). A malformed node or disco key in a netmap now skips that peer instead of leaving a half-decoded key behind. The WireGuard timestamp floor is persisted on synced boots too, so a boot before time sync no longer starts far below what the peers have already seen. Ported after reading the eikopf and TimelyToga microlink forks against wireguard-go.
+
+### Changed
+- **The relay region is the one measured closest, like the official client** (microlink netcheck; the router's `netcheck_override` setting is now on by default, `netcheck_threshold_ms` stays 100). The STUN probe that measures every DERP region used to read the replies only after the whole send sweep: the six-deep UDP mailbox dropped most of a 28-region burst, and the survivors' "latency" was the send order (a 400/450/500 ms staircase in the diagnostics, London picked for a Hungarian node), which is why the selection had been switched off. Replies are now read while probing, two samples per region with the lower one kept (WiFi modem-sleep adds up to 100 ms of jitter to a single sample), and the probe ends as soon as every region has answered: about 2 s instead of 17, so the tailnet comes up 10 s sooner after boot. The decision is sticky: the region changes only when the measured one beats the *current* one by the threshold, so two close regions no longer alternate from netmap to netmap. Measured on the reference router: all 28 regions answer, Frankfurt 19–21 ms, Nuremberg 21, Amsterdam 29; with the default region forced to New York the measurement moves home back to Frankfurt. The diagnostics now list all 28 regions instead of 16.
+- **WireGuard packets go only to an address DISCO has confirmed, or over the relay** (microlink). A new peer's WireGuard endpoint used to be seeded with the first endpoint in the netmap, an address nobody had verified: a peer's LAN or container address, or a port its NAT no longer maps. The endpoint now stays empty, which routes to the relay, until a direct DISCO reply sets it; that confirmed address is also what a stale-session reset falls back to. The netmap endpoints are still probed by DISCO. This is how the official client behaves.
+
+## [0.1.33] — 2026-10-13
+
+One setting. The WiFi modem-sleep that the ESP-IDF enables by default can now be switched off on the System card for routers where latency matters more than current draw; the default stays on, so nothing changes on upgrade. Device-tested before tagging on the WiFi-only reference router: manual OTA; the switch off and on with a reboot in between (setting persists, LAN ping average drops from about 50 ms to under 10 ms and comes back); the web endpoints; an official client using the router as exit node; peers direct.
+
+### Added
+- **WiFi power save switch** (System card, on by default = unchanged behaviour). With modem sleep on, traffic sent to the router waits for the uplink AP's next beacon; the reference router answers a LAN ping in 1–135 ms (average about 50) with it on and in 1–35 ms (average about 8) with it off, with the same shift on tunnel round trips and no change in throughput. Off draws more current, so it is a choice.
+
+## [0.1.32] — 2026-10-12
+
+Fixes, one of them a throughput fix. Logging sat on the WireGuard data path: with the console at INFO it capped the tunnel at about 0.9 Mbit/s (which 0.1.31's notes reported as the bench figure), and a 10-second state dump at WARN stalled the WireGuard task for a third of a second on every build. A `0.0.0.0/0` typed into the additional routes — the pre-0.1.31 way to offer an exit node — now counts as the exit-node switch, so such a router keeps its DNS service and NAT after upgrading (#18). Two microlink guards found in the ESPHome port. Device-tested before tagging on the WiFi-only reference router: manual OTA; an official client (Tailscale 1.102 on Linux) using the router as exit node downloads 5 MB in 8.5 s (4.9 Mbit/s, 5.7 on four connections; 0.87 before); using an exit node with LAN bypass from an AP client; the web endpoints; peers direct.
+
+### Fixed
+- **Tunnel throughput: logging no longer sits on the WireGuard data path** (microlink). Two per-packet INFO lines (one per received packet in the WireGuard task, one per sent packet in the TCP/IP thread) went out through the console sink, synchronously, on a 115200-baud UART; with the console level at INFO every packet paid about 12 ms for its line while the processor sat idle, a ceiling of about 150 packets/s — the "about 0.9 Mbit/s whatever the number of connections" of the 0.1.31 notes was this, on a bench whose console had been left at INFO. Both lines are debug-only now. Independently of the console level, a 10-second WireGuard state dump at WARN held the WireGuard task for 300–450 ms each time it ran (3.5 KB of text for 14 peers), long enough for the 32-deep receive queue to overflow under a download; the dump is INFO now and still available through an INFO-level sink. Measured on the reference router with an official client downloading through it as exit node: 0.87 → 5.1 Mbit/s on one stream, 6.2 on four.
+- **A default route typed in by hand now brings the exit-node DNS service with it** (#18, reported by [@5queezer](https://github.com/5queezer)). Before 0.1.31 the way to offer an exit node was to add `0.0.0.0/0` to the additional routes. A router configured like that kept offering the exit node after upgrading, but the DNS service and the automatic NAT hung on the new switch, so clients reached addresses and resolved nothing until the switch was found and the router restarted. A hand-listed `0.0.0.0/0` now counts as the switch being on.
+- An out-of-memory start of the Tailscale instance no longer ends in an assert and a reboot, and a stop request arriving while the instance waits for its relay connection is noticed at once instead of after the 15 s wait (microlink; both found in the ESPHome port, neither reproducible on the reference router).
+
+### Changed
+- Exit-node throughput is described with the numbers above instead of 0.1.31's "about 1 Mbit/s": roughly 5–6 Mbit/s on the reference bench over a direct path, a contributor's 6.3 Mbit/s with a phone, less when relayed or when the WiFi link is poor. The documentation also says what the console log level costs: INFO on the console formats every line synchronously on the UART, so leave it at WARN unless you are reading the log.
 
 ## [0.1.31] — 2026-10-05
 

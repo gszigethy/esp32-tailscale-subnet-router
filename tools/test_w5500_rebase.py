@@ -37,6 +37,7 @@ def compile_run(name: str, source: str) -> None:
 def test_routes() -> None:
     source = (ROOT / "main/tailscale_manager.c").read_text()
     helpers = "\n".join(function(source, signature) for signature in [
+        "static bool manual_routes_offer_exit(void)",
         "bool tailscale_exit_server_active(void)",
         "static size_t routes_append_unique(",
         "const char *tailscale_advertise_routes_effective(void)",
