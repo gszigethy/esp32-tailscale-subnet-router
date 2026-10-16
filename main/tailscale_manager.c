@@ -44,7 +44,11 @@ int32_t tailscale_advertise_ap = 1;
 int32_t tailscale_advertise_exit_node = 0;
 int32_t tailscale_max_peers = 16;
 uint32_t tailscale_exit_node_ip = 0;
-int32_t tailscale_netcheck_override = 1;          /* default: ON since 2026-10-13 — the relay region is the one the STUN probes measure as closest, like the official client. Was OFF while the netcheck read the replies only after the whole send sweep (RTTs were the send order, London for a Hungarian node); fixed in microlink. Sticky: switches only when the measured region beats the current one by tailscale_netcheck_threshold_ms. Runtime-overridable via NVS (ts_nc_ovr). */
+int32_t tailscale_netcheck_override =
+    1; /* default: ON since 2026-10-13 — the relay region is the one the STUN probes measure as closest, like the
+          official client. Was OFF while the netcheck read the replies only after the whole send sweep (RTTs were the
+          send order, London for a Hungarian node); fixed in microlink. Sticky: switches only when the measured region
+          beats the current one by tailscale_netcheck_threshold_ms. Runtime-overridable via NVS (ts_nc_ovr). */
 int32_t tailscale_netcheck_threshold_ms = 100;    /* default: 100 ms hysteresis (sticky — home routers rarely beat Frankfurt enough to be worth switching) */
 int32_t tailscale_default_derp_region = 0;        /* 0 = unset → Frankfurt fallback in microlink */
 int32_t tailscale_lan_bypass = 1;                  /* 1 = exit-node lets LAN egress via STA, like tailscale --exit-node-allow-lan-access */
@@ -264,24 +268,26 @@ static bool ap_cidr_from_nvs(char *out, size_t out_size)
  * was the way to offer an exit node, and such a configuration keeps offering
  * one after an upgrade -- so it has to bring the DNS service and the NAT
  * with it, or clients reach addresses but cannot resolve a single name. */
-static bool manual_routes_offer_exit(void)
-{
+static bool manual_routes_offer_exit(void) {
     static const char def[] = "0.0.0.0/0";
     const char *p = tailscale_advertise_routes ? tailscale_advertise_routes : "";
     while (*p) {
-        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+            p++;
         const char *end = p;
-        while (*end && *end != '\r' && *end != '\n') end++;
+        while (*end && *end != '\r' && *end != '\n')
+            end++;
         const char *trimmed = end;
-        while (trimmed > p && (trimmed[-1] == ' ' || trimmed[-1] == '\t')) trimmed--;
-        if ((size_t)(trimmed - p) == sizeof def - 1 && memcmp(p, def, sizeof def - 1) == 0) return true;
+        while (trimmed > p && (trimmed[-1] == ' ' || trimmed[-1] == '\t'))
+            trimmed--;
+        if ((size_t)(trimmed - p) == sizeof def - 1 && memcmp(p, def, sizeof def - 1) == 0)
+            return true;
         p = end;
     }
     return false;
 }
 
-bool tailscale_exit_server_active(void)
-{
+bool tailscale_exit_server_active(void) {
     return tailscale_enabled != 0 && tailscale_exit_node_ip == 0 &&
            (tailscale_advertise_exit_node != 0 || manual_routes_offer_exit());
 }
