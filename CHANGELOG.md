@@ -6,6 +6,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.35+W5500] - 2026-10-16
+
+### Released
+- Promotes v0.1.35-beta1+W5500 after the user confirmed that the beta works on the devices.
+- Firmware behavior matches the tested beta; only release version and documentation change.
+
+
 ## [0.1.35-beta1+W5500] - 2026-10-16
 
 ### From upstream
