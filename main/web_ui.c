@@ -2775,8 +2775,8 @@ static esp_err_t tailscale_handler(httpd_req_t *req)
                  * bare number. NULL (region 0 / not in DERPMap yet) → omit. */
                 const char *_hrn = microlink_get_derp_region_name(mlh, diag.derp_home_region);
                 if (_hrn) cJSON_AddStringToObject(runtime, "derp_home_region_name", _hrn);
-                microlink_derp_rtt_t _rtts[16];
-                int _nr = microlink_get_derp_rtts(mlh, _rtts, 16);
+                microlink_derp_rtt_t _rtts[32]; /* ML_MAX_DERP_REGIONS; the count passed below must not exceed this */
+                int _nr = microlink_get_derp_rtts(mlh, _rtts, 32);
                 cJSON *derp_rtts = cJSON_CreateArray();
                 for (int _i = 0; _i < _nr; _i++) {
                     cJSON *e = cJSON_CreateObject();
@@ -3173,6 +3173,13 @@ static esp_err_t system_handler(httpd_req_t *req)
         }
     }
 
+    /* WiFi power save (modem sleep): on unless NVS "wifi_ps" is 0. */
+    {
+        uint8_t ps = 1;
+        nvs_param_get_u8("wifi_ps", &ps);
+        cJSON_AddBoolToObject(root, "wifi_power_save", ps != 0);
+    }
+
     /* Telemetry status — the API key is intentionally not exposed. */
     telemetry_state_t tm = telemetry_get_state();
     cJSON *t = cJSON_CreateObject();
@@ -3328,6 +3335,14 @@ static esp_err_t system_save_handler(httpd_req_t *req)
         if (v != 0 && v < 8) v = 8;        /* IDF rejects values below 8 */
         nvs_save_u8("tx_pwr", (uint8_t)v);
         if (v >= 8) esp_wifi_set_max_tx_power((int8_t)v);
+    }
+
+    /* WiFi power save -- persist + apply live (see main.c for the why). */
+    const cJSON *ps_j = cJSON_GetObjectItem(root, "wifi_power_save");
+    if (cJSON_IsBool(ps_j)) {
+        bool on = cJSON_IsTrue(ps_j);
+        nvs_save_u8("wifi_ps", on ? 1 : 0);
+        esp_wifi_set_ps(on ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE);
     }
 
     /* Telemetry block — only the enabled toggle is editable from the UI.

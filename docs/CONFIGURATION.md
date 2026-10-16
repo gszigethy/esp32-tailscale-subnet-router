@@ -80,13 +80,25 @@ What to expect:
 
 - **IPv4 only.** `::/0` is announced because Tailscale wants the pair; IPv6
   traffic from a client is not carried.
-- **About 1 Mbit/s** on a direct path (measured: 5 MB in 45 s), less when
-  the path is relayed. Fine for browsing and API calls, not for video.
+- **Roughly 5–6 Mbit/s, and it depends on the setup.** On the reference
+  bench an official Linux client gets about 5 Mbit/s on one connection and
+  about 6 on four over a direct path (5 MB in 8 s); a contributor measured
+  6.3 Mbit/s with a phone on 5G. Less when the path is relayed or when the
+  WiFi link to the uplink is poor. Fine for browsing and API calls; do not
+  plan video around it.
+- **Leave the console log level at WARN** (System → SD card logging) unless
+  you are reading the log. Console output is written synchronously on the
+  115200-baud UART, so an INFO console costs the tasks that log their
+  share of the wire time; before 0.1.32 that alone capped the tunnel at
+  about 0.9 Mbit/s. The SD recorder's own level is not affected.
 - It **cannot be combined with using an exit node** (the setting below):
   the peers' traffic would go straight back into the tunnel. The save is
   refused if both are set.
 - With a selected exit node the same combination is ignored at boot, the
   exit node in use wins.
+- A `0.0.0.0/0` typed into the additional routes (how it was done before
+  the switch existed) counts as the switch being on, so an upgraded router
+  that already offered an exit node also gets the DNS service and the NAT.
 
 The DNS service is a small HTTP server on its own port (41180; clients
 learn it from the node's Hostinfo). It runs only in this mode and answers
@@ -177,6 +189,8 @@ snmpget  -v2c -c <community> <device-ip> 1.3.6.1.2.1.99.1.1.1.4.1  # temperature
 |---|---|
 | **Device name** | Friendly name shown in the UI header and `/api`. |
 | **Timezone** | Device TZ; a real change flags a pending reboot. |
+| **TX power** | 0 = IDF default (≈ 20 dBm), 8–84 in 0.25 dBm steps. Applied live and at boot. |
+| **WiFi power save** | On by default (modem sleep, the lower-current choice). With it on, traffic sent *to* the router waits for the uplink AP's next beacon: LAN ping 1–135 ms (average about 50) on the reference router against 1–35 ms (average about 8) with it off, and the same shift on tunnel round trips. Throughput is the same either way. Applied live and at boot. |
 | **Anonymous telemetry** | On by default; one toggle in the **About** card opts out. Daily anonymous hash + counters (see README → Telemetry). |
 | **SD card logging** | Enable + per-sink (console / SD) log level; the on-device flight recorder. |
 | **Firmware update (OTA)** | Manual upload, or polled auto-install window. Optional **beta channel** also offers GitHub pre-releases (off by default = stable releases only). |
