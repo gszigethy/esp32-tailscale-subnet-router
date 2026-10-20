@@ -187,9 +187,9 @@ snmpget  -v2c -c <community> <device-ip> 1.3.6.1.2.1.99.1.1.1.4.1  # temperature
 ## DDNS
 
 Keeps one DNS name pointed at the router's public IPv4 address, **off by
-default**. The device finds its public address by asking up to three HTTPS
-"what is my IP" services and only acts on an address at least two of them
-agree on, then sends one HTTPS request to your DNS provider when that
+default**. The device finds its public address by asking three HTTPS
+"what is my IP" services on every check and only acts on an address at least
+two of them agree on, then sends one HTTPS request to your DNS provider when that
 address (or the provider settings) changed. Everything is on the **DDNS**
 tab; changes apply on Save, no restart.
 
@@ -223,8 +223,8 @@ changed. It can be used once per 60 s; the button counts down.
    the clock set (until it is, the check retries every 60 s). A missing one
    shows as `waiting` with the reason.
 2. Ask all three sources, every check, and show each answer or error. The
-   address is the one at least two of them return. A valid answer is a 2xx with one dotted-quad public
-   address (not private, loopback, link-local, CGNAT, multicast or
+   address is the one at least two of them return. A valid answer is a 2xx
+   with one dotted-quad public address (not private, loopback, link-local, CGNAT, multicast or
    reserved). No agreement = `quorum-failed`, nothing is sent, and the next
    trigger retries.
 3. Send when the check was forced, the address or any request setting
