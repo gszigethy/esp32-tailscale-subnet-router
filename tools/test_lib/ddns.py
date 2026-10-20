@@ -208,7 +208,7 @@ def check_validation_errors(results: list[Result], spa: SpaClient) -> None:
                                          {"preset": "aws", "url": ""}]},
         "interval 0": {"interval_min": 0},
         "body with GET": {"method": "GET", "body": "ip={ip}"},
-        "private custom source": {"sources": [{"preset": "custom", "url": "http://192.168.1.1/"},  # NOSONAR: must be rejected
+        "private custom source": {"sources": [{"preset": "custom", "url": "https://192.168.1.1/"},
                                               {"preset": "icanhazip", "url": ""},
                                               {"preset": "aws", "url": ""}]},
     }
