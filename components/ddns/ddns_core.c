@@ -903,10 +903,9 @@ static ddns_err_t dry_run(const ddns_cfg_t *c) {
     if (!s)
         return DDNS_E_TOO_LONG;
     memcpy(&s->cfg, c, sizeof *c);
-    memset(s->cfg.user, 'x', strlen(c->user));
-    memset(s->cfg.pass, 'x', strlen(c->pass));
-    memset(s->cfg.token, 'x', strlen(c->token));
-    ddns_err_t e = ddns_fill(&s->cfg, 0x01020304u, &s->req);
+    /* Validate actual encoding growth and the longest dotted-quad. Error messages contain
+     * only error codes, and both the scratch settings and filled request are wiped below. */
+    ddns_err_t e = ddns_fill(&s->cfg, UINT32_MAX, &s->req);
     ddns_wipe(s, sizeof *s);
     s_release(s);
     return e;

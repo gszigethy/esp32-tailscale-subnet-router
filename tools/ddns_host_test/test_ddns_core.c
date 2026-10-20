@@ -443,6 +443,39 @@ static void test_validate_dry_run_caps(void) {
     CHECK(validate(&c, msg) == DDNS_E_TOO_LONG);
 }
 
+/* Save must reject requests that only overflow after real credentials are encoded. */
+static void test_validate_encoded_secrets(void) {
+    ddns_cfg_t c = cfg_with("https://h.example/?ip={ip}&token={token}");
+    memset(c.token, '/', 128);
+    c.token[128] = 0;
+    c.method = DDNS_M_POST;
+    strcpy(c.body, "a={token}&b={token}&c={token}");
+    char msg[128];
+    CHECK(validate(&c, msg) == DDNS_E_TOO_LONG);
+
+    c.body_type = DDNS_BODY_JSON;
+    memset(c.token, '\t', 128);
+    strcpy(c.body, "{\"a\":\"{token}{token}\"}");
+    CHECK(validate(&c, msg) == DDNS_E_TOO_LONG);
+
+    c = cfg_with("https://h.example/?ip={ip}");
+    strcpy(c.header, "Authorization: Bearer {token}");
+    strcpy(c.token, "invalid\nheader");
+    CHECK(validate(&c, msg) == DDNS_E_HEADER);
+
+    c = cfg_with("https://h.example/?ip={ip}");
+    c.method = DDNS_M_POST;
+    for (int i = 0; i < 70; i++)
+        strcat(c.body, "{ip}");
+    CHECK(validate(&c, msg) == DDNS_E_TOO_LONG); /* A 15-character IPv4 must fit too. */
+
+    c = cfg_with("https://h.example/?ip={ip}");
+    /* A legal 128-byte unreserved token still fits the URL and remains accepted. */
+    memset(c.token, 'x', 128);
+    c.token[128] = 0;
+    CHECK(validate(&c, msg) == DDNS_OK);
+}
+
 static void test_fingerprint(void) {
     ddns_cfg_t a = cfg_with("https://h.example/?ip={ip}");
     ddns_cfg_t b = a;
@@ -797,6 +830,7 @@ int main(void) {
     test_validate_ranges();
     test_validate_desec_example_ok();
     test_validate_dry_run_caps();
+    test_validate_encoded_secrets();
     test_fingerprint();
     test_url_host();
     test_match();

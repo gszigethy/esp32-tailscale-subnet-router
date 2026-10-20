@@ -1,3 +1,11 @@
+> Implementation follow-up after independent review: DDNS now uses nonblocking
+> ESP-TLS and the HTTP parser, with asynchronous lwIP DNS and one 20-second
+> deadline. The validated IPv4 is reused with the original TLS/HTTP hostname.
+> Save returns busy after a 200 ms lock wait. Save-time filling uses real
+> credentials and a 15-character IPv4. Status-only polling preserves edits.
+> The original transport details below describe the initial design; see
+> `components/ddns/ddns_http.c` and `docs/CONFIGURATION.md` for current behavior.
+
 # Dynamic DNS client: design
 
 Date: 2026-10-20 · Status: draft for approval (revision 3, after the

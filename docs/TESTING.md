@@ -262,6 +262,27 @@ The original `exit_node_ip` is always restored at the end.
   the runner restores it in a `finally:`, but if the runner is killed
   hard, manually `POST /api/tailscale {"settings":{"exit_node_ip":""}}`.
 
+## DDNS host regressions
+
+These checks do not contact a device or external network:
+
+```bash
+make -C tools/ddns_host_test test
+python3 tools/test_ddns_http.py
+node tools/test_ddns_ui.cjs
+```
+
+The HTTP test requires the ESP-IDF package installed by `pio run -e esp32-s3`.
+It runs the production transport and ESP-IDF HTTP parser with deterministic
+DNS/TLS fakes under AddressSanitizer and UBSan: deadline expiry during DNS,
+connection, partial writes, trickled headers and stalled bodies; late DNS
+completion; chunked and close-delimited answers; custom headers and the
+public-address policy. The browser regression runs the actual DDNS script
+with a small DOM and fake timers to check that Force and periodic status
+refresh preserve edits, secrets and Save state, avoid overlapping polls,
+and skip hidden or unauthenticated pages. These checks complement firmware
+build/static analysis and do not establish live TLS or device behavior.
+
 ## Adding a test
 
 1. Create `tools/test_lib/<new>.py` exporting `MODULE_ID`, `MODULE_DESC`,

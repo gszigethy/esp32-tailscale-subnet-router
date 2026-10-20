@@ -210,12 +210,17 @@ tab; changes apply on Save, no restart.
 | **Refresh every N days** | Re-sends an unchanged address after N days, 0 (default) = never. |
 
 Password and Token are write-only: the API and the page only ever say
-whether they are set and how long they are. Leave the input empty to keep
+whether they are set and how long they are. Save validates the fully encoded
+request, including the longest IPv4 string. If a provider dispatch is active,
+Save returns busy after 200 ms; retry it after the request finishes.
+Leave the input empty to keep
 the stored value; **Clear** removes it on Save. The eye button only reveals
 what you typed in this session.
 
 **Force update now** runs a check at once and sends even when nothing
-changed. It can be used once per 60 s; the button counts down.
+changed. It can be used once per 60 s; the button counts down. While the DDNS
+tab is visible, status refreshes every five seconds without replacing form
+fields or typed secrets.
 
 ### How a check works
 
@@ -233,7 +238,11 @@ changed. It can be used once per 60 s; the button counts down.
 4. Before connecting, the provider and custom-source hosts are resolved and
    refused if they point at a private, loopback, link-local, CGNAT or
    tailnet address. Redirects are never followed. One request, 20 s budget,
-   at most 1024 bytes of answer read.
+   at most 1024 bytes of answer retained; classification uses that prefix at
+   the byte cap. A response that ends before its declared length and before
+   the cap is a temporary failure. DNS resolution and
+   nonblocking TLS/HTTP I/O share one deadline; the validated IPv4 address is
+   reused for the connection while preserving the hostname for TLS and HTTP.
 
 The device's own traffic to public addresses leaves through the uplink even
 when an exit node is selected, so the quorum sees the uplink's address, not

@@ -72,8 +72,8 @@ void ddns_get_status(ddns_status_t *out);
 void ddns_get_config(ddns_cfg_t *out, size_t *pass_len, size_t *token_len);
 
 /* Validate + persist + apply. keep_flags keep the stored password/token instead of in's. On error
- * msg says why and the old settings stay. in's secrets are wiped before returning. May wait up to
- * the 20 s provider-request budget. */
+ * msg says why and the old settings stay. in's secrets are wiped before returning. Returns
+ * ESP_ERR_TIMEOUT after 200 ms if a provider dispatch holds the lock; the caller may retry. */
 esp_err_t ddns_save_config(ddns_cfg_t *in, unsigned keep_flags, char *msg, size_t msg_sz);
 
 /* "Force update now". false (and *wait_s) if used less than 60 s ago. Returns at once. */

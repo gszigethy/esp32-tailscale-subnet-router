@@ -4045,7 +4045,10 @@ static esp_err_t ddns_post_handler(httpd_req_t *req) {
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_sendstr(req, "{\"ok\":true}");
     }
-    return ddns_send_error(req, err == ESP_ERR_INVALID_ARG ? "400 Bad Request" : "500 Internal Server Error", msg);
+    const char *status = err == ESP_ERR_INVALID_ARG ? "400 Bad Request"
+                         : err == ESP_ERR_TIMEOUT   ? "503 Service Unavailable"
+                                                    : "500 Internal Server Error";
+    return ddns_send_error(req, status, msg);
 }
 
 static esp_err_t ddns_force_handler(httpd_req_t *req) {

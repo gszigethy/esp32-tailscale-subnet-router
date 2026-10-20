@@ -23,6 +23,7 @@
  * SPDX-License-Identifier: MIT */
 
 #include "ddns.h"
+#include "ddns_http.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,11 +31,8 @@
 #include <strings.h>
 #include <time.h>
 
-#include "esp_app_desc.h"
-#include "esp_crt_bundle.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
-#include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
@@ -44,7 +42,6 @@
 #include "freertos/task.h"
 #include "http_parser.h"
 #include "lwip/inet.h"
-#include "lwip/netdb.h"
 #include "nvs.h"
 #include "snmp_agent.h"
 
@@ -55,7 +52,6 @@ static const char *TAG = "ddns";
 #define NVS_KEY_STOP "ddns_stop"
 
 #define US_PER_S 1000000LL
-#define REQ_BUDGET_US (20 * US_PER_S) /* DNS + connect + TLS + body */
 #define WAN_DELAY_US (10 * US_PER_S)
 #define TIME_RETRY_US (60 * US_PER_S)
 #define MAX_WAIT_MS 60000 /* per notify wait; keeps pdMS_TO_TICKS small */
@@ -154,148 +150,14 @@ static bool url_host(const char *url, char *host, size_t host_sz) {
     return true;
 }
 
-/* Every IPv4 address the host resolves to must be public. Literal IPs go through the same path. */
-static bool dest_allowed(const char *host) {
-    struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
-    struct addrinfo *res = NULL;
-    if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) {
-        if (res)
-            freeaddrinfo(res);
-        return false;
-    }
-    bool ok = true;
-    for (struct addrinfo *a = res; a; a = a->ai_next) {
-        if (a->ai_family != AF_INET || !a->ai_addr) {
-            ok = false;
-            break;
-        }
-        const struct sockaddr_in *sin = (const struct sockaddr_in *)a->ai_addr;
-        if (!ddns_ipv4_is_public(ntohl(sin->sin_addr.s_addr))) {
-            ok = false;
-            break;
-        }
-    }
-    freeaddrinfo(res);
-    return ok;
-}
+/* The transport releases the dispatch lock after writing or on an early failure. */
+static void dispatch_written(void) { xSemaphoreGive(s_lock); }
 
-/* ---- HTTP exchange ---- */
-
-typedef struct {
-    char *retry_after;
-    size_t ra_sz;
-} hdr_ctx_t;
-
-/* esp_http_client_get_header() reads *request* headers, so Retry-After is captured here. */
-static esp_err_t http_event(esp_http_client_event_t *e) {
-    hdr_ctx_t *ctx = e->user_data;
-    if (e->event_id == HTTP_EVENT_ON_HEADER && ctx && ctx->retry_after && e->header_key && e->header_value &&
-        strcasecmp(e->header_key, "Retry-After") == 0)
-        copy_str(ctx->retry_after, ctx->ra_sz, e->header_value);
-    return ESP_OK;
-}
-
-static esp_http_client_method_t map_method(ddns_method_t m) {
-    switch (m) {
-    case DDNS_M_POST:
-        return HTTP_METHOD_POST;
-    case DDNS_M_PUT:
-        return HTTP_METHOD_PUT;
-    case DDNS_M_PATCH:
-        return HTTP_METHOD_PATCH;
-    case DDNS_M_GET:
-    default:
-        return HTTP_METHOD_GET;
-    }
-}
-
-/* Returns the HTTP status, or <0 on a transport error. With hold_lock_until_written the caller
- * holds s_lock, and it is released here once the request is on the wire (or failed). */
 static int http_exchange(const char *url, ddns_method_t m, const ddns_req_t *req, bool json_body, char *resp,
                          size_t resp_cap, size_t *resp_len, bool *timed_out, char *retry_after, size_t ra_sz,
                          bool hold_lock_until_written) {
-    int64_t start = esp_timer_get_time();
-    *resp_len = 0;
-    *timed_out = false;
-    if (retry_after && ra_sz)
-        retry_after[0] = '\0';
-
-    hdr_ctx_t ctx = {.retry_after = retry_after, .ra_sz = ra_sz};
-    esp_http_client_config_t cfg = {
-        .url = url,
-        .method = map_method(m),
-        .timeout_ms = 10000,
-        .disable_auto_redirect = true,
-        .keep_alive_enable = false,
-        /* internal RAM (below the PSRAM malloc threshold): an IP source (no req) answers <= 64 bytes */
-        .buffer_size = req ? 1024 : 512,
-        .buffer_size_tx = req ? 1024 : 512,
-        .event_handler = http_event,
-        .user_data = &ctx,
-    };
-    if (strncasecmp(url, "https://", 8) == 0)
-        cfg.crt_bundle_attach = esp_crt_bundle_attach;
-
-    int status = -1;
-    bool locked = hold_lock_until_written;
-    esp_http_client_handle_t c = esp_http_client_init(&cfg);
-    if (!c)
-        goto out;
-
-    char ua[48];
-    snprintf(ua, sizeof ua, "esp32-tsr-ddns/%s", esp_app_get_description()->version);
-    esp_http_client_set_header(c, "User-Agent", ua);
-    size_t body_len = 0;
-    if (req) {
-        body_len = strlen(req->body);
-        if (body_len)
-            esp_http_client_set_header(c, "Content-Type",
-                                       json_body ? "application/json" : "application/x-www-form-urlencoded");
-        if (req->auth[0])
-            esp_http_client_set_header(c, "Authorization", req->auth);
-        if (req->has_header)
-            esp_http_client_set_header(c, req->hdr_name, req->hdr_value);
-    }
-
-    if (esp_http_client_open(c, (int)body_len) != ESP_OK) {
-        *timed_out = esp_timer_get_time() - start >= REQ_BUDGET_US;
-        goto out;
-    }
-    if (body_len && esp_http_client_write(c, req->body, (int)body_len) != (int)body_len)
-        goto out;
-    if (locked) {
-        xSemaphoreGive(s_lock);
-        locked = false;
-    }
-
-    if (esp_http_client_fetch_headers(c) < 0) {
-        *timed_out = true;
-        goto out;
-    }
-    status = esp_http_client_get_status_code(c);
-    while (*resp_len < resp_cap) {
-        if (esp_timer_get_time() - start >= REQ_BUDGET_US) {
-            *timed_out = true;
-            break;
-        }
-        int n = esp_http_client_read(c, resp + *resp_len, (int)(resp_cap - *resp_len));
-        if (n < 0) {
-            *timed_out = true; /* connection drop mid-body */
-            break;
-        }
-        if (n == 0)
-            break;
-        *resp_len += (size_t)n;
-    }
-
-out:
-    if (locked)
-        xSemaphoreGive(s_lock);
-    if (c) {
-        esp_http_client_close(c);
-        esp_http_client_cleanup(c);
-    }
-    return status;
+    return ddns_http_exchange(url, m, req, json_body, resp, resp_cap, resp_len, timed_out, retry_after, ra_sz,
+                              hold_lock_until_written ? dispatch_written : NULL);
 }
 
 /* ---- stop persistence (esp_timer task: internal stack, may write flash) ---- */
@@ -333,15 +195,13 @@ static void fetch_source(const ddns_cfg_t *c, int slot, char *buf, bool *ok, uin
         copy_str(err, err_sz, "invalid URL");
         return;
     }
-    if (!dest_allowed(host)) {
-        copy_str(err, err_sz, "destination not public");
-        return;
-    }
     size_t len = 0;
     bool to = false;
     int st = http_exchange(url, DDNS_M_GET, NULL, false, buf, SRC_READ_CAP, &len, &to, NULL, 0, false);
     if (to)
         copy_str(err, err_sz, "timeout");
+    else if (st == DDNS_HTTP_DEST_DENIED)
+        copy_str(err, err_sz, "destination not public");
     else if (st < 0)
         copy_str(err, err_sz, "connect failed");
     else if (ddns_parse_ip_answer(st, buf, len, ip))
@@ -489,11 +349,6 @@ static void run_check(void) {
         status_set(DDNS_ST_PROVIDER_ERROR, "invalid URL");
         goto cleanup;
     }
-    if (!dest_allowed(host)) {
-        status_set(DDNS_ST_PROVIDER_ERROR, "destination not public");
-        goto cleanup;
-    }
-
     xSemaphoreTake(s_lock, portMAX_DELAY);
     int64_t t_disp = esp_timer_get_time();
     portENTER_CRITICAL(&s_trig);
@@ -535,7 +390,7 @@ static void run_check(void) {
     if (st < 0 && !to) {
         memset(&r, 0, sizeof r);
         r.outcome = DDNS_OUT_TEMP;
-        copy_str(r.reason, sizeof r.reason, "connect failed");
+        copy_str(r.reason, sizeof r.reason, st == DDNS_HTTP_DEST_DENIED ? "destination not public" : "connect failed");
     } else {
         r = ddns_classify(st, to, resp, len, cfg->match, ra);
     }
@@ -867,7 +722,12 @@ esp_err_t ddns_save_config(ddns_cfg_t *in, unsigned keep_flags, char *msg, size_
     if (ddns_cfg_validate(in, msg, msg_sz) != DDNS_OK)
         goto out;
 
-    xSemaphoreTake(s_lock, portMAX_DELAY); /* may wait for a dispatch, at most the request budget */
+    /* The HTTP server has one task: a stalled provider must not hold all API requests hostage. */
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(200)) != pdTRUE) {
+        copy_str(msg, msg_sz, "DDNS request in progress; try saving again");
+        ret = ESP_ERR_TIMEOUT;
+        goto out;
+    }
     xSemaphoreTake(s_nvs_lock, portMAX_DELAY);
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);

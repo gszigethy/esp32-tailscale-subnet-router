@@ -6501,6 +6501,23 @@
       ddnsForceWait(st.force_wait_s);
     }
 
+    var s_ddns_status_pending = false;
+
+    function refreshDdnsStatus() {
+      var page = document.getElementById('page-ddns');
+      if (!page || !page.classList.contains('active') || s_ddns_status_pending) return;
+      if (document.getElementById('authSetup').style.display !== 'none' ||
+          document.getElementById('authLogin').style.display !== 'none') return;
+      s_ddns_status_pending = true;
+      apiFetch('/api/ddns')
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(function (d) { applyDdnsStatus(d.status || {}); })
+        .catch(function () {})
+        .finally(function () { s_ddns_status_pending = false; });
+    }
+
+    setInterval(refreshDdnsStatus, 5000);
+
     function loadDdns() {
       apiFetch('/api/ddns')
         .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
@@ -6633,7 +6650,7 @@
             if (j.queued) {
               showToast('success', 'Update queued', 'The check runs in the background; the status below refreshes.', 4000);
               ddnsForceWait(60);
-              setTimeout(loadDdns, 5000);
+              setTimeout(refreshDdnsStatus, 5000);
             } else {
               ddnsForceWait(j.wait_s);
             }
