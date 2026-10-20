@@ -4,10 +4,16 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.38-beta3+W5500] - 2026-10-20
 
-### Added
+### Fork changes
 - DDNS client: keeps one DNS name pointed at the public IPv4. The address must be agreed by two of three HTTPS IP sources. Any single-request provider works through a URL/header/body template; secrets are write-only. Permanent rejections stop updates and survive a reboot, and 429 and dnserr/911 cooldowns are honoured. The status shows on a new DDNS tab, on the Status page and over SNMP (NET-SNMP-EXTEND-MIB, index `"ddns"`). See `docs/CONFIGURATION.md#ddns`.
+- The DDNS client is generic (no W5500 code) and is intended for upstream as its own PR; only its uplink wiring in `main.c` is fork-specific.
+
+### Validation
+- Host tests: 241/241. Device (ESP32-S3, W5500 wired uplink): the `ddns` module passes with live internet checks and the Wi-Fi retry check; the exit-node quorum check is not run on this bench.
+- Internal heap low-water mark with DDNS enabled after one update: 5,635 bytes (5,411 bytes on beta2 with DDNS off).
+- Prerelease; device confirmation of OTA, wired uplink, tunnel, failover/reconnect and DDNS with a real provider is required before stable promotion.
 
 ## [0.1.38-beta2+W5500] - 2026-10-20
 
