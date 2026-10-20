@@ -6,6 +6,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.38-beta2+W5500] - 2026-10-20
+
+### Fork changes
+- Reconstructs the fork on upstream v0.1.38 as six logical commits: W5500 hardware, uplink routing/failover, DNS, Ethernet UI, fork OTA identity, and tests/CI/documentation.
+- The reconstructed source tree matches beta1 exactly before this release's version and documentation changes; firmware behavior is unchanged.
+- Existing release tags and assets are retained. Main history is intentionally rewritten; existing checkouts must reconcile with the new history.
+
+### Validation
+- Prerelease; device confirmation of OTA, wired uplink, tunnel, failover/reconnect, and exit-node hosting is still required before stable promotion.
+
 ## [0.1.38-beta1+W5500] - 2026-10-20
 
 ### From upstream
