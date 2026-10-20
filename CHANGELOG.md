@@ -6,6 +6,21 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.38-beta1+W5500] - 2026-10-20
+
+### From upstream
+- Updates to Csontikka's v0.1.38, including v0.1.36 relay-region reporting and stale-peer recovery, v0.1.37 bounded control-frame stalls, and v0.1.38 synchronous TCPIP-thread WireGuard lifecycle and uplink-roam heap-corruption fixes.
+- Includes in-place WireGuard transmit encryption, transmit profiling, early tunnel-handle withdrawal, and synchronized SD recorder snapshots.
+
+### Fork divergences
+- Retains W5500 Ethernet, wired routing/failover, active-uplink DNS, route composition, Ethernet UI, and fork OTA ownership.
+
+### Fork changes
+- Refreshes the upstream base and microlink submodule; no new Ethernet behavior is introduced.
+
+### Validation
+- Prerelease; device confirmation of OTA, wired uplink, tunnel, failover/reconnect, and exit-node hosting is required before stable promotion.
+
 ## [0.1.35+W5500] - 2026-10-16
 
 ### Released
@@ -46,6 +61,33 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Validation
 - Prerelease; device confirmation of OTA, wired uplink, tunnel, and exit-node hosting is required before stable promotion.
 
+## [0.1.38] — 2026-10-20
+
+A regression fix and a send-path change. **0.1.37 can reboot the router on an uplink roam or reconnect**: the WireGuard interface teardown it moved onto the TCPIP thread did not wait for that thread, so the interface was freed while still on lwIP's list, and the next timer that walked the list corrupted the heap. Every 0.1.37 router should take this update. WireGuard packets are now encrypted in place in the buffer that goes out on the WiFi, saving two allocations and two copies per packet (6% less CPU per packet, throughput unchanged). Device-tested before tagging on the WiFi-only reference router: manual OTA; a 4-minute tunnel soak through rekeys without loss; 20 forced uplink roams with heap poisoning on 0.1.37 (4 reboots) against the fix (none), then 20 more on the release candidate with the heap flat; the exit node's tailscaled frozen for 40 s; an official client using the router as exit node; using an exit node from an AP client; the two send paths A/B in the same boot; the web endpoints; peers direct.
+
+### Fixed
+- **Uplink roams no longer corrupt the heap and reboot the router** (microlink; regression in 0.1.37). 0.1.37 moved the WireGuard interface's lwIP teardown onto the TCPIP thread through `tcpip_callback_with_block()`, which only blocks on posting the request, not on its completion: the WireGuard manager task freed the interface while the TCPIP thread had not yet unlinked it from the interface list, and the next timer that walked the list (DHCP, DNS, neighbour discovery) read freed memory. With heap poisoning on, 4 of 20 forced roams rebooted on 0.1.37 and 0 of 20 on 0.1.36; without it the corruption surfaced less often, as a `PANIC` in the TCPIP task on a later allocation. The four TCPIP-thread steps (interface init, bring-up, output PCB, teardown) now run through `esp_netif_tcpip_exec()`, which waits for them. Device-tested: 20 forced roams with heap poisoning without a reboot, then 20 more on the release candidate with the heap flat.
+- **The tunnel handle is withdrawn before the tunnel is torn down** (router). Every reader outside the lifecycle lock (web UI, telemetry, peer DNS, the SD recorder) fetched the instance handle while it was being stopped and freed on an uplink roam; the handle now goes NULL first, and the SD recorder's snapshot holds a mutex while it reads the instance, so a snapshot in progress is waited out instead of raced.
+
+### Changed
+- **WireGuard packets are encrypted in place in the buffer that goes out on the WiFi** (microlink). The transport packet used to be built in an internal-RAM buffer, encrypted, copied into a SPIRAM buffer and copied again into the socket buffer: four allocations (two of them internal RAM, ~1.3 KB per packet) and three copies per packet. It is now built and encrypted in the SPIRAM socket buffer itself: two allocations (32 B of internal RAM), one copy. Measured in the same boot with a runtime switch (`POST /api/debug/wg-tx`): 715 µs instead of 763 µs of CPU per packet on the send path, throughput unchanged (the air time is the limit, 3.0/5.2 Mbit/s either way), internal-RAM minimum unchanged. The per-packet cost counters are reported under `memory.wg_tx_*` in `/api/system/diag`. Idea from the DannyNov fork's wgopt1 experiment.
+
+## [0.1.37] — 2026-10-19
+
+Three robustness fixes in microlink, found while reading the other maintained forks (MedAouadhi, DannyNov) after 0.1.36. A control connection that stalls in the middle of a frame is given up after 5 s instead of hours; the WireGuard interface joins and leaves lwIP on the TCPIP thread, where this firmware's lwIP (no core locking) requires it; and a tunnel stop that times out leaves the instance out of service rather than idle. Device-tested before tagging on the WiFi-only reference router: manual OTA; a 4-minute tunnel soak through rekeys without loss; six forced uplink roams, each a full stop and restart of the tunnel, with the heap flat and the tunnel back every time; the web endpoints; peers direct.
+
+### Fixed
+- **A control connection that stalls in the middle of a frame is given up after 5 s, not hours** (microlink). The coordinator's Noise frames are read in two parts (header, payload); if the server went away between them, or mid-payload, the reader retried 300 times on a socket whose timeout is 60 s on the long poll, with the coordinator task (and the 120 s stream watchdog it drives) stuck inside for up to five hours, and when it finally gave up it reported "no data yet", so the long poll kept reading a stream it could no longer parse. A stall after a partial read is now bounded by the clock (5 s) and reported as a transport error, which reconnects. Spotted while reading the MedAouadhi microlink fork.
+- **The WireGuard interface joins and leaves lwIP on the TCPIP thread** (microlink). The interface was linked into lwIP's netif list, its UDP PCB created and its timer armed from the WireGuard manager task, and unlinked, the PCB removed and the timer disarmed from the same task at teardown, while the TCPIP thread walks that list for every forwarded packet and owns the PCB and timeout lists; this firmware runs lwIP without core locking, so these were races. Both directions now run as blocking callbacks on the TCPIP thread. Device-tested with six forced uplink roams (each a full stop, destroy and restart of the tunnel): heap flat (+64 B), uptime continuous, the tunnel back after every roam. Spotted while reading the MedAouadhi and DannyNov forks.
+- **A tunnel stop that times out leaves the instance out of service instead of idle** (microlink). If a task was still running 15 s after the stop request, the instance was marked idle, which let a second start build a new set of tasks on top of the old ones. It is now marked as errored and the stop reports a timeout; the destroy path already refused to free such an instance. Spotted while reading the DannyNov fork's lifecycle experiment.
+
+## [0.1.36] — 2026-10-19
+
+Two fixes in microlink from this week's pass over the other maintained microlink forks (MedAouadhi, espkvm). The relay region the router reports to the control plane is now the one it actually sits on (since 0.1.34 it reported the configured default while connecting to the measured one, so peers outside Europe could be sent to the wrong relay), and a peer that silently lost its WireGuard session is re-handshaked after 15 s instead of up to 180 s. Device-tested before tagging on the WiFi-only reference router: manual OTA; the reported region checked from an official client (Tailscale 1.102 on Linux) with the default forced to Dallas, against 0.1.35; the exit node's tailscaled frozen for 40 s, against 0.1.35; a 4-minute tunnel soak through rekeys; an official client using the router as exit node; using an exit node with LAN bypass from an AP client; the web endpoints; peers direct.
+
+### Fixed
+- **The relay region reported to the control plane is the one the router actually uses** (microlink). Since 0.1.34 the router connects to the relay region the STUN measurement finds closest, but it kept reporting the configured default region (`PreferredDERP`), and the control plane echoes that back to every peer as the router's home relay. A peer with no direct path therefore sent its WireGuard packets to a relay the router was not connected to; in Europe the two regions coincide (Frankfurt), elsewhere they can differ. The reported region is now the one in use, the control plane's echo no longer overwrites the measured pick on each netmap, a changed pick is sent to the control plane at once, and the relay connection moves to the new region instead of waiting for the next reconnect. Device-tested with the default forced to Dallas: the measurement keeps Frankfurt, and an official client on the tailnet now sees the router's relay as `fra` where 0.1.35 showed `dfw`. Found by comparing notes with the MedAouadhi microlink fork.
+- **A peer that silently lost its session gets a new handshake after 15 s** (microlink, wireguard-lwip). When the router sends data on a valid session and nothing authenticated comes back for 15 s, it starts a new handshake, the way wireguard-go's `timerNewHandshake` does. A peer that restarted drops the router's packets without a word and, with no traffic of its own, never initiates; until now the tunnel to it stayed dead until the key aged out (up to 180 s). Keepalives do not arm the timer and any authenticated packet from the peer disarms it, so a live peer never triggers it; a dead one is retried every 15 s while something still sends to it. Device-tested with the exit node's tailscaled frozen for 40 s: the router sent its handshake 17 s after the last reply and again 17 s later, the tunnel was back one second after the thaw, and a 60 s and a 4-minute tunnel soak afterwards showed no spurious handshake. Found in the espkvm microlink fork.
 
 ## [0.1.35] — 2026-10-13
 
