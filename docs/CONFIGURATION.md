@@ -346,6 +346,33 @@ snmpget -v2c -c <community> <device-ip> 1.3.6.1.4.1.8072.1.3.2.3.1.4.4.100.100.1
 # Zabbix: item on that OID, trigger  last(/esp32-router/ddns.result)>=3
 ```
 
+#### LibreNMS
+
+LibreNMS graphs and alerts on `nsExtendResult."ddns"` as a **Custom OID**.
+It can't show the text rows: Custom OIDs only take numbers, and `ddns` is
+not one of LibreNMS's built-in Applications.
+
+1. Add the router as an SNMP v2c device with its community. It reports no
+   sysObjectID, so LibreNMS treats it as a generic device.
+2. Device → Edit → **Custom OID** → Add:
+   - **Name** `ddns`
+   - **OID** `1.3.6.1.4.1.8072.1.3.2.3.1.4.4.100.100.110.115`
+   - **Data Type** `GAUGE`
+   - **Divisor** / **Multiplier** `1`
+   - **Alert Thresholds → High** `3`, so every failure state alerts
+   - **Alerts Enabled** on
+
+   Press **Test**: only an OID that passed is polled.
+3. Alerts → Alert Rules → *Create rule from collection* → **CustomOID over
+   limit** (`customoid_current >= customoid_limit`), then attach a transport.
+
+The graph is under the device's Graphs → Custom OID, or in a dashboard Graph
+widget of type *Customoid*. A warning threshold of `2` would also flag
+`waiting`, which is normal while no uplink is up. To see the text line, add a
+LibreNMS Service with the monitoring plugin `check_snmp` on
+`nsExtendOutput1Line."ddns"`
+(`1.3.6.1.4.1.8072.1.3.2.3.1.1.4.100.100.110.115`).
+
 ## System
 
 | Field | Meaning |
