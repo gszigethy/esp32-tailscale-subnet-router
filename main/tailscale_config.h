@@ -21,7 +21,8 @@ extern char* tailscale_login_server;     // "" = Tailscale SaaS; otherwise Heads
 extern char* tailscale_ipn_version;      // Hostinfo.IPNVersion reported to the control plane; "" = not reported (default)
 extern char* tailscale_advertise_routes; // Newline-separated CIDRs (e.g. "192.168.4.0/24\n192.168.1.0/24")
 extern int32_t tailscale_advertise_ap;   // 1 (default) = the AP subnet is advertised as a subnet route, computed live from the AP settings; 0 = only the listed routes
-extern int32_t tailscale_advertise_exit_node; // 1 = offer this router as an exit node (see tailscale_exit_server_active)
+extern int32_t
+    tailscale_advertise_exit_node;       // 1 = offer this router as an exit node (see tailscale_exit_server_active)
 extern int32_t tailscale_max_peers;      // Active WG tunnels (microlink default 16, range 1..64)
 extern uint32_t tailscale_exit_node_ip;  // VPN IP (host byte order) of selected exit node; 0 = none
 extern int32_t tailscale_netcheck_override;       // 1 = let netcheck override the chosen default region, 0 = always stay on default
@@ -90,6 +91,13 @@ void tailscale_set_subnet(uint32_t ip, uint32_t mask);
  * recomputed on every call. */
 const char *tailscale_advertise_routes_effective(void);
 bool tailscale_in_subnet(uint32_t ip);
+
+/* W5500 fork: what is actually advertised. tailscale_advertise_routes_effective()
+ * (AP subnet + manual list) plus the per-interface auto-routes -- the wired
+ * ETH LAN when eth_route_en, the WiFi STA LAN when sta_route_en -- with
+ * duplicates dropped. Same contract as the upstream helper: newline-separated,
+ * NULL when nothing is advertised, static storage recomputed on every call. */
+const char *tailscale_compose_routes(void);
 
 #ifdef __cplusplus
 }
