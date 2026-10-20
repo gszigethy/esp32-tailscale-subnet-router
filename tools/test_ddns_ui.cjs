@@ -4,7 +4,10 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 const html = fs.readFileSync(path.join(__dirname, '../main/index.html'), 'utf8');
-for (const script of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) new vm.Script(script[1]);
+// Compile trusted, checked-in page scripts to validate syntax without running the whole SPA.
+for (const script of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) {
+  new vm.Script(script[1]); // NOSONAR: compilation is the assertion; constructor throws on invalid syntax. No external code is loaded.
+}
 const start = html.indexOf('    var s_ddns_clear =');
 const end = html.indexOf('    // =====================================================================', start);
 const elements = new Map();
@@ -31,7 +34,7 @@ const context = {
   }
 };
 vm.createContext(context);
-vm.runInContext(html.slice(start, end), context);
+vm.runInContext(html.slice(start, end), context); // NOSONAR: only checked-in SPA code runs, with the fake DOM above and no external input.
 const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 (async () => {
   const poll = timers.find(x => x.interval && x.ms === 5000);

@@ -221,7 +221,8 @@ int ddns_http_exchange(const char *url, ddns_method_t method, const ddns_req_t *
     snprintf(addr, sizeof addr, "%u.%u.%u.%u", (unsigned)(ip >> 24), (unsigned)(ip >> 16) & 255,
              (unsigned)(ip >> 8) & 255, (unsigned)ip & 255);
     bool https = strncmp(url, "https://", 8) == 0;
-    if (!https && strncmp(url, "http://", 7) != 0)
+    /* Save validation permits at most one HTTP source; the provider always requires HTTPS. */
+    if (!https && strncmp(url, "http://", 7) != 0) // NOSONAR: opt-in plain-HTTP IP source.
         goto out;
     int port = u.field_set & (1 << UF_PORT) ? u.port : (https ? 443 : 80);
     if (u.field_set & (1 << UF_PORT))
