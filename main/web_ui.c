@@ -5,6 +5,7 @@
 #include "web_ui.h"
 #include "acl.h"
 #include "cJSON.h"
+#include "ddns.h"
 #include "dhcp_reservations.h"
 #include "dhcps_ext.h"
 #include "dns_relay.h"
@@ -41,6 +42,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 /* Cap on log payloads we surface over /api endpoints — both the live
@@ -234,6 +236,10 @@ static float sample_cpu_temp_c(void)
     if (!snmp_agent_chip_temp_c(&tc)) return -999.0f;
     return tc;
 }
+
+static const char *ddns_state_name(ddns_state_t s);
+static void ddns_ip_str(char *out, size_t sz, uint32_t ip);
+static double ddns_ok_age_s(const ddns_status_t *st);
 
 static esp_err_t status_handler(httpd_req_t *req)
 {
@@ -513,6 +519,21 @@ static esp_err_t status_handler(httpd_req_t *req)
         cJSON_AddBoolToObject(snmp, "enabled", snmp_agent_is_enabled());
         cJSON_AddBoolToObject(snmp, "running", snmp_agent_is_running());
         cJSON_AddItemToObject(root, "snmp", snmp);
+    }
+
+    /* DDNS one-liner for the uplink card; details live in /api/ddns. */
+    ddns_status_t *dst = heap_caps_calloc(1, sizeof *dst, MALLOC_CAP_SPIRAM);
+    if (dst) {
+        char ip[16];
+        ddns_get_status(dst);
+        cJSON *d = cJSON_CreateObject();
+        cJSON_AddStringToObject(d, "state", ddns_state_name(dst->state));
+        cJSON_AddStringToObject(d, "provider_host", dst->provider_host);
+        ddns_ip_str(ip, sizeof ip, dst->quorum_ip);
+        cJSON_AddStringToObject(d, "quorum_ip", ip);
+        cJSON_AddNumberToObject(d, "last_ok_age_s", ddns_ok_age_s(dst));
+        cJSON_AddItemToObject(root, "ddns", d);
+        free(dst);
     }
 
     char *body = cJSON_PrintUnformatted(root);
@@ -3713,6 +3734,357 @@ static const httpd_uri_t uri_snmp_post = {
     .uri = "/api/snmp", .method = HTTP_POST, .handler = snmp_post_handler,
 };
 
+/* ===== DDNS ===== */
+
+static const char *const k_ddns_methods[] = {"GET", "POST", "PUT", "PATCH"};
+static const char *const k_ddns_presets[] = {"ipify", "icanhazip", "aws", "ifconfig", "custom"};
+static const char *const k_ddns_states[] = {
+    [DDNS_ST_DISABLED] = "disabled",
+    [DDNS_ST_WAITING] = "waiting",
+    [DDNS_ST_OK] = "ok",
+    [DDNS_ST_QUORUM_FAILED] = "quorum-failed",
+    [DDNS_ST_PROVIDER_ERROR] = "provider-error",
+    [DDNS_ST_COOLDOWN] = "cooldown",
+    [DDNS_ST_STOPPED] = "stopped",
+};
+
+static const char *ddns_state_name(ddns_state_t s) {
+    return (unsigned)s < sizeof k_ddns_states / sizeof k_ddns_states[0] ? k_ddns_states[s] : "disabled";
+}
+
+static void ddns_ip_str(char *out, size_t sz, uint32_t ip) {
+    if (!ip) {
+        out[0] = '\0';
+        return;
+    }
+    snprintf(out, sz, "%u.%u.%u.%u", (unsigned)(ip >> 24), (unsigned)(ip >> 16) & 255, (unsigned)(ip >> 8) & 255,
+             (unsigned)ip & 255);
+}
+
+static double ddns_ok_age_s(const ddns_status_t *st) {
+    if (!st->last_ok_wall)
+        return -1;
+    time_t now = time(NULL);
+    return now >= st->last_ok_wall ? (double)(now - st->last_ok_wall) : 0;
+}
+
+/* POSTs that change state accept JSON only: a cross-site HTML form can send
+ * x-www-form-urlencoded / text/plain without a preflight, never JSON. */
+static bool require_json(httpd_req_t *req) {
+    char ct[64] = "";
+    if (httpd_req_get_hdr_value_str(req, "Content-Type", ct, sizeof ct) == ESP_OK &&
+        strncasecmp(ct, "application/json", 16) == 0)
+        return true;
+    httpd_resp_set_status(req, "415 Unsupported Media Type");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"error\":\"Content-Type must be application/json\"}");
+    return false;
+}
+
+static esp_err_t send_json_root(httpd_req_t *req, cJSON *root, const char *status) {
+    char *body = root ? cJSON_PrintUnformatted(root) : NULL;
+    cJSON_Delete(root);
+    if (!body) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    if (status)
+        httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_sendstr(req, body);
+    free(body);
+    return err;
+}
+
+static cJSON *ddns_status_json(const ddns_status_t *st) {
+    char ip[16];
+    cJSON *s = cJSON_CreateObject();
+    cJSON_AddStringToObject(s, "state", ddns_state_name(st->state));
+    cJSON_AddStringToObject(s, "detail", st->detail);
+    cJSON_AddStringToObject(s, "provider_host", st->provider_host);
+    cJSON *srcs = cJSON_AddArrayToObject(s, "sources");
+    for (int i = 0; i < 3; i++) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddBoolToObject(o, "asked", st->src[i].asked);
+        cJSON_AddBoolToObject(o, "ok", st->src[i].ok);
+        ddns_ip_str(ip, sizeof ip, st->src[i].ok ? st->src[i].ip : 0);
+        cJSON_AddStringToObject(o, "ip", ip);
+        cJSON_AddStringToObject(o, "error", st->src[i].err);
+        cJSON_AddItemToArray(srcs, o);
+    }
+    ddns_ip_str(ip, sizeof ip, st->quorum_ip);
+    cJSON_AddStringToObject(s, "quorum_ip", ip);
+    ddns_ip_str(ip, sizeof ip, st->last_ok_ip);
+    cJSON_AddStringToObject(s, "last_ok_ip", ip);
+    cJSON_AddNumberToObject(s, "last_ok_age_s", ddns_ok_age_s(st));
+    cJSON_AddNumberToObject(s, "last_http", st->last_http);
+    cJSON_AddStringToObject(s, "last_error", st->last_error);
+    cJSON_AddStringToObject(s, "snippet", st->snippet);
+    cJSON_AddNumberToObject(s, "next_check_s", st->next_check_s);
+    cJSON_AddNumberToObject(s, "cooldown_s", st->cooldown_s);
+    cJSON_AddNumberToObject(s, "force_wait_s", st->force_wait_s);
+    cJSON_AddNumberToObject(s, "stack_free_min", st->stack_free_min);
+    return s;
+}
+
+static esp_err_t ddns_get_handler(httpd_req_t *req) {
+    if (require_auth(req) != ESP_OK)
+        return ESP_FAIL;
+    ddns_cfg_t *c = heap_caps_calloc(1, sizeof *c, MALLOC_CAP_SPIRAM);
+    ddns_status_t *st = heap_caps_calloc(1, sizeof *st, MALLOC_CAP_SPIRAM);
+    if (!c || !st) {
+        free(c);
+        free(st);
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    size_t pass_len = 0, token_len = 0;
+    ddns_get_config(c, &pass_len, &token_len); /* pass/token come back zeroed */
+    ddns_get_status(st);
+
+    cJSON *root = cJSON_CreateObject();
+    if (root) {
+        cJSON_AddBoolToObject(root, "enabled", c->enabled);
+        cJSON_AddStringToObject(root, "url", c->url);
+        cJSON_AddStringToObject(root, "method", k_ddns_methods[c->method < 4 ? c->method : 0]);
+        cJSON_AddStringToObject(root, "header", c->header);
+        cJSON_AddStringToObject(root, "body", c->body);
+        cJSON_AddStringToObject(root, "body_type", c->body_type == DDNS_BODY_JSON ? "json" : "form");
+        cJSON_AddBoolToObject(root, "src_ip", c->src_ip);
+        cJSON_AddStringToObject(root, "user", c->user);
+        cJSON_AddBoolToObject(root, "pass_set", pass_len > 0);
+        cJSON_AddNumberToObject(root, "pass_len", pass_len);
+        cJSON_AddBoolToObject(root, "token_set", token_len > 0);
+        cJSON_AddNumberToObject(root, "token_len", token_len);
+        cJSON_AddStringToObject(root, "match", c->match);
+        cJSON *srcs = cJSON_AddArrayToObject(root, "sources");
+        for (int i = 0; i < 3; i++) {
+            cJSON *o = cJSON_CreateObject();
+            uint8_t k = c->src[i].kind <= DDNS_SRC_CUSTOM ? c->src[i].kind : DDNS_SRC_CUSTOM;
+            cJSON_AddStringToObject(o, "preset", k_ddns_presets[k]);
+            cJSON_AddStringToObject(o, "url", k == DDNS_SRC_CUSTOM ? c->src[i].custom : "");
+            cJSON_AddItemToArray(srcs, o);
+        }
+        cJSON_AddNumberToObject(root, "interval_min", c->interval_min);
+        cJSON_AddBoolToObject(root, "wan_trigger", c->wan_trigger);
+        cJSON_AddNumberToObject(root, "refresh_days", c->refresh_days);
+        cJSON_AddItemToObject(root, "status", ddns_status_json(st));
+    }
+    ddns_wipe(c, sizeof *c);
+    free(c);
+    free(st);
+    return send_json_root(req, root, NULL);
+}
+
+static int ddns_lookup(const char *const *names, int n, const char *v) {
+    for (int i = 0; i < n; i++)
+        if (strcasecmp(names[i], v) == 0)
+            return i;
+    return -1;
+}
+
+/* Copy a JSON string field into dst; false (and a message) if it does not fit. */
+static bool ddns_take_str(const cJSON *root, const char *key, char *dst, size_t sz, char *msg, size_t msg_sz) {
+    const cJSON *j = cJSON_GetObjectItem(root, key);
+    if (!cJSON_IsString(j) || !j->valuestring)
+        return true;
+    if (strlen(j->valuestring) >= sz) {
+        snprintf(msg, msg_sz, "%s is too long (max %u)", key, (unsigned)(sz - 1));
+        return false;
+    }
+    strcpy(dst, j->valuestring);
+    return true;
+}
+
+static bool ddns_take_uint(const cJSON *root, const char *key, uint16_t *dst, char *msg, size_t msg_sz) {
+    const cJSON *j = cJSON_GetObjectItem(root, key);
+    if (!j)
+        return true;
+    if (!cJSON_IsNumber(j) || j->valuedouble < 0 || j->valuedouble > 65535 ||
+        j->valuedouble != (double)(int)j->valuedouble) {
+        snprintf(msg, msg_sz, "%s must be a whole number", key);
+        return false;
+    }
+    *dst = (uint16_t)j->valueint;
+    return true;
+}
+
+static void ddns_wipe_secret_items(cJSON *root) {
+    static const char *const keys[] = {"pass", "token"};
+    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++) {
+        cJSON *j = cJSON_GetObjectItem(root, keys[i]);
+        if (cJSON_IsString(j) && j->valuestring)
+            ddns_wipe(j->valuestring, strlen(j->valuestring));
+    }
+}
+
+static esp_err_t ddns_send_error(httpd_req_t *req, const char *status, const char *msg) {
+    cJSON *r = cJSON_CreateObject();
+    if (r)
+        cJSON_AddStringToObject(r, "error", msg && msg[0] ? msg : "invalid settings");
+    return send_json_root(req, r, status);
+}
+
+static esp_err_t ddns_post_handler(httpd_req_t *req) {
+    if (require_auth(req) != ESP_OK)
+        return ESP_FAIL;
+    if (!require_json(req))
+        return ESP_FAIL;
+
+    size_t buf_size = 8192;
+    char *buf = malloc_body_buf(buf_size);
+    if (!buf) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    int n = 0;
+    if (recv_body(req, buf, buf_size, &n) != ESP_OK) {
+        free(buf);
+        return ESP_FAIL;
+    }
+    cJSON *root = cJSON_Parse(buf);
+    ddns_wipe(buf, (size_t)n);
+    free(buf);
+    if (!root)
+        return ddns_send_error(req, "400 Bad Request", "invalid JSON");
+
+    ddns_cfg_t *c = heap_caps_calloc(1, sizeof *c, MALLOC_CAP_SPIRAM);
+    if (!c) {
+        ddns_wipe_secret_items(root);
+        cJSON_Delete(root);
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+    ddns_get_config(c, NULL, NULL); /* seed: omitted keys keep their value */
+    unsigned keep = DDNS_KEEP_PASS | DDNS_KEEP_TOKEN;
+    char msg[96] = "";
+    bool ok = true;
+    const cJSON *j;
+
+    if (cJSON_IsBool(j = cJSON_GetObjectItem(root, "enabled")))
+        c->enabled = cJSON_IsTrue(j);
+    if (cJSON_IsBool(j = cJSON_GetObjectItem(root, "src_ip")))
+        c->src_ip = cJSON_IsTrue(j);
+    if (cJSON_IsBool(j = cJSON_GetObjectItem(root, "wan_trigger")))
+        c->wan_trigger = cJSON_IsTrue(j);
+    if (cJSON_IsString(j = cJSON_GetObjectItem(root, "method"))) {
+        int m = ddns_lookup(k_ddns_methods, 4, j->valuestring);
+        if (m < 0) {
+            ok = false;
+            snprintf(msg, sizeof msg, "method must be GET, POST, PUT or PATCH");
+        } else
+            c->method = (uint8_t)m;
+    }
+    if (ok && cJSON_IsString(j = cJSON_GetObjectItem(root, "body_type"))) {
+        if (strcasecmp(j->valuestring, "json") == 0)
+            c->body_type = DDNS_BODY_JSON;
+        else if (strcasecmp(j->valuestring, "form") == 0)
+            c->body_type = DDNS_BODY_FORM;
+        else {
+            ok = false;
+            snprintf(msg, sizeof msg, "body_type must be form or json");
+        }
+    }
+    ok = ok && ddns_take_str(root, "url", c->url, sizeof c->url, msg, sizeof msg) &&
+         ddns_take_str(root, "header", c->header, sizeof c->header, msg, sizeof msg) &&
+         ddns_take_str(root, "body", c->body, sizeof c->body, msg, sizeof msg) &&
+         ddns_take_str(root, "user", c->user, sizeof c->user, msg, sizeof msg) &&
+         ddns_take_str(root, "match", c->match, sizeof c->match, msg, sizeof msg) &&
+         ddns_take_uint(root, "interval_min", &c->interval_min, msg, sizeof msg) &&
+         ddns_take_uint(root, "refresh_days", &c->refresh_days, msg, sizeof msg);
+    /* Secrets: absent or empty keeps the stored value; *_clear empties it. */
+    if (ok && cJSON_IsString(j = cJSON_GetObjectItem(root, "pass")) && j->valuestring[0]) {
+        ok = ddns_take_str(root, "pass", c->pass, sizeof c->pass, msg, sizeof msg);
+        keep &= ~DDNS_KEEP_PASS;
+    }
+    if (ok && cJSON_IsString(j = cJSON_GetObjectItem(root, "token")) && j->valuestring[0]) {
+        ok = ddns_take_str(root, "token", c->token, sizeof c->token, msg, sizeof msg);
+        keep &= ~DDNS_KEEP_TOKEN;
+    }
+    if (cJSON_IsTrue(cJSON_GetObjectItem(root, "pass_clear"))) {
+        c->pass[0] = '\0';
+        keep &= ~DDNS_KEEP_PASS;
+    }
+    if (cJSON_IsTrue(cJSON_GetObjectItem(root, "token_clear"))) {
+        c->token[0] = '\0';
+        keep &= ~DDNS_KEEP_TOKEN;
+    }
+    const cJSON *srcs = cJSON_GetObjectItem(root, "sources");
+    if (ok && cJSON_IsArray(srcs)) {
+        if (cJSON_GetArraySize(srcs) != 3) {
+            ok = false;
+            snprintf(msg, sizeof msg, "sources must list 3 entries");
+        }
+        for (int i = 0; ok && i < 3; i++) {
+            const cJSON *o = cJSON_GetArrayItem(srcs, i);
+            const cJSON *p = cJSON_GetObjectItem(o, "preset");
+            if (cJSON_IsString(p)) {
+                int k = ddns_lookup(k_ddns_presets, 5, p->valuestring);
+                if (k < 0) {
+                    ok = false;
+                    snprintf(msg, sizeof msg, "unknown source preset");
+                    break;
+                }
+                c->src[i].kind = (uint8_t)k;
+            }
+            ok = ddns_take_str(o, "url", c->src[i].custom, sizeof c->src[i].custom, msg, sizeof msg);
+        }
+    }
+    ddns_wipe_secret_items(root);
+    cJSON_Delete(root);
+
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+    if (ok)
+        err = ddns_save_config(c, keep, msg, sizeof msg); /* wipes c's secrets */
+    ddns_wipe(c, sizeof *c);
+    free(c);
+    if (err == ESP_OK) {
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":true}");
+    }
+    return ddns_send_error(req, err == ESP_ERR_INVALID_ARG ? "400 Bad Request" : "500 Internal Server Error", msg);
+}
+
+static esp_err_t ddns_force_handler(httpd_req_t *req) {
+    if (require_auth(req) != ESP_OK)
+        return ESP_FAIL;
+    if (!require_json(req))
+        return ESP_FAIL;
+    char drain[64];
+    int left = req->content_len;
+    while (left > 0) { /* body content is irrelevant; drain it */
+        int got = httpd_req_recv(req, drain, left < (int)sizeof drain ? left : (int)sizeof drain);
+        if (got <= 0)
+            break;
+        left -= got;
+    }
+    uint32_t wait_s = 0;
+    bool queued = ddns_force(&wait_s);
+    cJSON *r = cJSON_CreateObject();
+    if (r) {
+        cJSON_AddBoolToObject(r, "queued", queued);
+        if (!queued)
+            cJSON_AddNumberToObject(r, "wait_s", wait_s);
+    }
+    return send_json_root(req, r, NULL);
+}
+
+static const httpd_uri_t uri_ddns_get = {
+    .uri = "/api/ddns",
+    .method = HTTP_GET,
+    .handler = ddns_get_handler,
+};
+static const httpd_uri_t uri_ddns_post = {
+    .uri = "/api/ddns",
+    .method = HTTP_POST,
+    .handler = ddns_post_handler,
+};
+static const httpd_uri_t uri_ddns_force = {
+    .uri = "/api/ddns/force",
+    .method = HTTP_POST,
+    .handler = ddns_force_handler,
+};
+
 static const httpd_uri_t uri_system_restart = {
     .uri = "/api/system/restart", .method = HTTP_POST, .handler = system_restart_handler,
 };
@@ -5177,7 +5549,7 @@ void web_ui_init(void)
      * instead of WebCrypto's ~100 ms. */
     httpd_config_t conf           = HTTPD_DEFAULT_CONFIG();
     conf.uri_match_fn             = httpd_uri_match_wildcard;
-    conf.max_uri_handlers = 72; /* 63 registered; reg_uri() logs if this runs out */
+    conf.max_uri_handlers = 72; /* 67 registered; reg_uri() logs if this runs out */
     conf.stack_size               = 12288;
     /* Without the mbedTLS context cost we can afford the bigger pool
      * the pre-HTTPS web server used. The SPA's first-paint opens 5-7
@@ -5227,6 +5599,9 @@ void web_ui_init(void)
     reg_uri(server, &uri_system_save);
     reg_uri(server, &uri_snmp_get);
     reg_uri(server, &uri_snmp_post);
+    reg_uri(server, &uri_ddns_get);
+    reg_uri(server, &uri_ddns_post);
+    reg_uri(server, &uri_ddns_force);
     reg_uri(server, &uri_system_restart);
     reg_uri(server, &uri_system_factory_reset);
     reg_uri(server, &uri_system_ota);
