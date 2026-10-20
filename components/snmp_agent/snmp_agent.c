@@ -65,11 +65,13 @@
 #define SNMP_PORT    161
 #define PKT_BUF     2048
 #define TASK_STACK  4096
-#define MAX_OID     16
+/* MAX_OID: NET-SNMP-EXTEND-MIB output rows are 18 arcs. */
+#define MAX_OID 24
 #define MAX_TASKS    52   /* enough for a busy ESP-IDF system */
 #define CPU_SAMPLE_S  5   /* CPU usage sampling interval (seconds) */
 #define VBL_BUF      2000
 #define PDU_BODY_BUF 2048
+/* VB_BUF also fits an 18-arc extend OID (~21 B) + 255-byte nsExtendOutputFull (258 B). */
 #define VB_BUF        320   /* OID + BER header + 255-byte configured string */
 #define COMM_TLV_BUF  260
 
@@ -772,6 +774,50 @@ static val_t g_ents_units(void)  { return (val_t){ .s = "C" }; }
 static val_t g_ents_ts(void)     { return g_sysuptime(); }
 static val_t g_ents_rate(void)   { return (val_t){ .i = 0 }; }  /* read on demand */
 
+/* --- NET-SNMP-EXTEND-MIB: one read-only entry, index "ddns" ---
+ * The status comes from a callback registered by the DDNS component, so this
+ * agent never depends on it. One snapshot per PDU keeps the four output
+ * columns consistent within a single GET/GETNEXT. */
+static snmp_extend_fill_fn volatile s_ddns_fill;
+static snmp_extend_snapshot_t *volatile s_ext; /* PSRAM, allocated with the source */
+static bool s_ext_fresh;
+static const snmp_extend_snapshot_t k_ext_disabled = {
+    .line1 = "disabled", .full = "disabled", .num_lines = 1, .result = 1};
+
+void snmp_agent_set_ddns_source(snmp_extend_fill_fn fill) {
+    if (fill && !s_ext)
+        s_ext = heap_caps_calloc(1, sizeof *s_ext, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_ddns_fill = s_ext ? fill : NULL; /* the buffer is set before the source that writes it */
+}
+
+static const snmp_extend_snapshot_t *ext_snapshot(void) {
+    snmp_extend_fill_fn fill = s_ddns_fill;
+    snmp_extend_snapshot_t *ext = s_ext;
+    if (!fill || !ext)
+        return &k_ext_disabled;
+    if (!s_ext_fresh) {
+        memset(ext, 0, sizeof *ext);
+        fill(ext);
+        ext->line1[sizeof ext->line1 - 1] = '\0';
+        ext->full[sizeof ext->full - 1] = '\0';
+        s_ext_fresh = true;
+    }
+    return ext;
+}
+
+static val_t g_ext_num(void) { return (val_t){.i = 1}; }
+static val_t g_ext_command(void) { return (val_t){.s = "ddns"}; }
+static val_t g_ext_empty(void) { return (val_t){.s = ""}; }
+static val_t g_ext_zero(void) { return (val_t){.i = 0}; }
+/* cacheTime 1 s / execType exec(1) / runType run-on-read(1) / status active(1) */
+static val_t g_ext_one(void) { return (val_t){.i = 1}; }
+static val_t g_ext_storage(void) { return (val_t){.i = 5}; } /* readOnly(5) */
+static val_t g_ext_line1(void) { return (val_t){.s = ext_snapshot()->line1}; }
+static val_t g_ext_full(void) { return (val_t){.s = ext_snapshot()->full}; }
+static val_t g_ext_lines(void) { return (val_t){.i = ext_snapshot()->num_lines}; }
+static val_t g_ext_result(void) { return (val_t){.i = ext_snapshot()->result}; }
+
+/* clang-format off */
 /* Must be in ascending OID lexicographic order. */
 static const mib_row_t s_mib[] = {
 /* sysDescr        */ {{{1,3,6,1,2,1,1,1,0},9},            VT_STRING,    g_sysdescr},
@@ -858,10 +904,25 @@ static const mib_row_t s_mib[] = {
 /* entPhySensUni.1 */ {{{1,3,6,1,2,1,99,1,1,1,6,1},12},    VT_STRING,    g_ents_units},
 /* entPhySensTs.1  */ {{{1,3,6,1,2,1,99,1,1,1,7,1},12},    VT_TIMETICKS, g_ents_ts},
 /* entPhySensRate.1*/ {{{1,3,6,1,2,1,99,1,1,1,8,1},12},    VT_INT32,     g_ents_rate},
+/* --- NET-SNMP-EXTEND-MIB, entry "ddns" = 4.100.100.110.115 --- */
+/* nsExtendNumEnt  */ {{{1,3,6,1,4,1,8072,1,3,2,1,0},12},  VT_INT32,     g_ext_num},
+/* nsExtendCommand */ {{{1,3,6,1,4,1,8072,1,3,2,2,1,2,4,100,100,110,115},18}, VT_STRING, g_ext_command},
+/* nsExtendArgs    */ {{{1,3,6,1,4,1,8072,1,3,2,2,1,3,4,100,100,110,115},18}, VT_STRING, g_ext_empty},
+/* nsExtendInput   */ {{{1,3,6,1,4,1,8072,1,3,2,2,1,4,4,100,100,110,115},18}, VT_STRING, g_ext_empty},
+/* nsExtendCacheTm */ {{{1,3,6,1,4,1,8072,1,3,2,2,1,5,4,100,100,110,115},18}, VT_INT32,  g_ext_zero},
+/* nsExtendExecTyp */ {{{1,3,6,1,4,1,8072,1,3,2,2,1,6,4,100,100,110,115},18}, VT_INT32,  g_ext_one},
+/* nsExtendRunType */ {{{1,3,6,1,4,1,8072,1,3,2,2,1,7,4,100,100,110,115},18}, VT_INT32,  g_ext_one},
+/* nsExtendStorage */ {{{1,3,6,1,4,1,8072,1,3,2,2,1,20,4,100,100,110,115},18}, VT_INT32, g_ext_storage},
+/* nsExtendStatus  */ {{{1,3,6,1,4,1,8072,1,3,2,2,1,21,4,100,100,110,115},18}, VT_INT32, g_ext_one},
+/* nsExtOut1Line   */ {{{1,3,6,1,4,1,8072,1,3,2,3,1,1,4,100,100,110,115},18}, VT_STRING, g_ext_line1},
+/* nsExtOutFull    */ {{{1,3,6,1,4,1,8072,1,3,2,3,1,2,4,100,100,110,115},18}, VT_STRING, g_ext_full},
+/* nsExtOutNumLine */ {{{1,3,6,1,4,1,8072,1,3,2,3,1,3,4,100,100,110,115},18}, VT_INT32,  g_ext_lines},
+/* nsExtendResult  */ {{{1,3,6,1,4,1,8072,1,3,2,3,1,4,4,100,100,110,115},18}, VT_INT32,  g_ext_result},
 /* --- private tree: only what has no standard equivalent --- */
 /* heapMinFree     */ {{{1,3,6,1,4,1,99999,1,1,4,0},11},   VT_GAUGE32,   g_heap_minfree},
 };
 #define MIB_LEN ((int)(sizeof(s_mib)/sizeof(s_mib[0])))
+/* clang-format on */
 
 static int oid_cmp(const uint32_t *a, int an, const uint32_t *b, int bn)
 {
@@ -914,6 +975,7 @@ static int process_pdu(const uint8_t *in, int inlen,
     const uint8_t *p = in;
     int rem = inlen, len;
 
+    s_ext_fresh = false; /* one extend snapshot per PDU */
     if (ber_tlv(&p, &rem, &len) != 0x30) return -1;
     if (len < rem) rem = len;              /* ignore any trailing garbage */
 
