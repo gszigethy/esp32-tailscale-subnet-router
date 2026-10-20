@@ -165,6 +165,7 @@ varbind, so bulk walks simply take more round trips.
 | MIB-II interfaces | `1.3.6.1.2.1.2` | Fixed indices: **1** `eth0`, **2** `wlan0`, **3** `ts0` (Tailscale tunnel). Octet and packet counters on all three. |
 | HOST-RESOURCES-MIB | `1.3.6.1.2.1.25` | `hrProcessorLoad.{1,2}` per core (0–100, 5 s window), `hrStorageTable` for internal DRAM and PSRAM, `hrSystemProcesses` for the task count. |
 | ENTITY-SENSOR-MIB | `1.3.6.1.2.1.99` | Die temperature, deci-degrees Celsius (`entPhySensorPrecision` = 1, so 508 means 50.8 °C). |
+| NET-SNMP-EXTEND-MIB | `1.3.6.1.4.1.8072.1.3.2` | One row with index `"ddns"` (`4.100.100.110.115`) carrying the [DDNS](#ddns) status; present even when DDNS is off. |
 | Private | `1.3.6.1.4.1.99999.1.1.4.0` | `heapMinFreeBytes`, the all-time-low free-heap watermark — the one reading with no standard equivalent. **99999 is not an IANA-assigned enterprise number**; do not grow this tree. |
 
 Interface indices are deliberately fixed rather than derived from lwIP's
@@ -181,6 +182,159 @@ snmpwalk -v2c -c <community> <device-ip> 1.3.6.1.2.1.1        # system
 snmpwalk -v2c -c <community> <device-ip> 1.3.6.1.2.1.2.2.1.10 # ifInOctets
 snmpget  -v2c -c <community> <device-ip> 1.3.6.1.2.1.25.3.3.1.2.1  # CPU core 0
 snmpget  -v2c -c <community> <device-ip> 1.3.6.1.2.1.99.1.1.1.4.1  # temperature
+```
+
+## DDNS
+
+Keeps one DNS name pointed at the router's public IPv4 address, **off by
+default**. The device finds its public address by asking up to three HTTPS
+"what is my IP" services and only acts on an address at least two of them
+agree on, then sends one HTTPS request to your DNS provider when that
+address (or the provider settings) changed. Everything is on the **DDNS**
+tab; changes apply on Save, no restart.
+
+| Field | Meaning |
+|---|---|
+| **Enabled** | Off = no DDNS traffic at all. |
+| **Update URL** | The provider's update URL, `https://` only, with the placeholders `{ip}` `{user}` `{pass}` `{token}`. Values are percent-encoded (`{ip}` as is). Put secrets in the fields below, never literally in the URL: a literal value after `token=`, `key=`, `password=`, `pass=`, `pwd=`, `secret=`, `apikey=`, `secretapikey=` or `q=` is refused on Save, and a literal `user:pass@` is moved into User/Password for you. This check is best effort — a secret in a path segment gets through, so keep them out. |
+| **Provider uses the request's source IP** | For providers that publish the address the request comes from (DY.fi, OpenDNS, ClouDNS dynamic URLs). Makes `{ip}` optional; the quorum still decides *when* to send. |
+| **Advanced request → Method** | GET (default), POST, PUT or PATCH. |
+| **Advanced request → Extra header** | One `Name: value` line, allowed with any method. An `Authorization` header replaces Basic auth. `Host`, `Content-Length`, `Transfer-Encoding`, `Connection` and `Cookie` are refused. |
+| **Advanced request → Body template / Body type** | POST/PUT/PATCH only. Form (values percent-encoded) or JSON (placeholders only inside string values, values JSON-escaped; the result must parse). |
+| **User / Password** | Sent as Basic auth when both are set (or when the URL has `{user}:{pass}@`), and available as `{user}` / `{pass}`. |
+| **Token** | Available as `{token}`. |
+| **Success if response contains** | `|`-separated alternatives, case-sensitive substrings; a leading `^` anchors to the start of the trimmed answer. Empty = any 2xx counts. Examples: `^good|^nochg` (dyndns2), `OK` (DuckDNS), `<ErrCount>0</ErrCount>` (Namecheap). For JSON APIs that report errors with the HTTP status, leave it empty. |
+| **IP source 1–3** | Each slot picks a different source: api.ipify.org, ipv4.icanhazip.com, checkip.amazonaws.com, ifconfig.me, or a Custom URL. Defaults: ipify, icanhazip, AWS. At most one source may be plain `http://`. |
+| **Check every N min** | 1–1440, default 5. |
+| **Also when WAN gets an IP** | Default on: an uplink gaining or losing an address (including failover) schedules a check about 10 s later. |
+| **Refresh every N days** | Re-sends an unchanged address after N days, 0 (default) = never. |
+
+Password and Token are write-only: the API and the page only ever say
+whether they are set and how long they are. Leave the input empty to keep
+the stored value; **Clear** removes it on Save. The eye button only reveals
+what you typed in this session.
+
+**Force update now** runs a check at once and sends even when nothing
+changed. It can be used once per 60 s; the button counts down.
+
+### How a check works
+
+1. Prerequisites: DDNS enabled, an uplink up, no OTA install running, and
+   the clock set (until it is, the check retries every 60 s). A missing one
+   shows as `waiting` with the reason.
+2. Ask all three sources, every check, and show each answer or error. The
+   address is the one at least two of them return. A valid answer is a 2xx with one dotted-quad public
+   address (not private, loopback, link-local, CGNAT, multicast or
+   reserved). No agreement = `quorum-failed`, nothing is sent, and the next
+   trigger retries.
+3. Send when the check was forced, the address or any request setting
+   changed since the last success, or a refresh is due. The last successful
+   address lives in RAM, so the first check after every boot sends once.
+4. Before connecting, the provider and custom-source hosts are resolved and
+   refused if they point at a private, loopback, link-local, CGNAT or
+   tailnet address. Redirects are never followed. One request, 20 s budget,
+   at most 1024 bytes of answer read.
+
+The device's own traffic to public addresses leaves through the uplink even
+when an exit node is selected, so the quorum sees the uplink's address, not
+the exit node's.
+
+### States
+
+| State | Means | Leaves it |
+|---|---|---|
+| `disabled` | Enabled is off. | Turn it on. |
+| `waiting` | A prerequisite is missing (no uplink, OTA in progress, waiting for time sync). | On its own once the prerequisite is met. |
+| `ok` | Last check agreed on an address and the provider is up to date. | — |
+| `quorum-failed` | The IP sources did not agree. | Next trigger retries. |
+| `provider-error` | Temporary failure: timeout, connect failure, cut-off answer, `redirect (3xx)`, 5xx, or a 2xx that did not match. Ambiguous results back off: the wait between provider attempts doubles from the interval up to 1 h until a success. | On its own; saving the settings resets the back-off. |
+| `cooldown` | The provider asked to slow down: HTTP 429 (honours `Retry-After` in seconds, capped at 24 h, 10 min without it) or `dnserr` / `911` (30 min). IP checks continue; no provider call is made, not even on Force. | On its own when the shown time runs out. |
+| `stopped` | Permanent rejection: HTTP 401, 403 or 404, or `badauth`, `nohost`, `notfqdn`, `numhost`, `!donator`, `abuse`, `badagent`. Kept in NVS, so a reboot does not retry it. | Fix the settings and Save, or press Force. |
+
+Whatever the trigger, the provider is called at most once per 60 s.
+
+The status block shows each source's answer, the agreed address, the last
+success and its age, the last HTTP status and error, and the first 64
+printable characters of the provider's answer with the stored password and
+token masked as `***`. Logs, the SD log, the pre-crash capture and SNMP
+only ever carry the provider's host name, an error code and the HTTP
+status — never a URL, request or answer body.
+
+### Limits
+
+- **IPv4 only**; no AAAA records.
+- **One request per update.** Providers that need an ID lookup, a login,
+  OAuth or request signing (DigitalOcean, Linode, Route 53, Azure, Hover,
+  …) are not supported.
+- **One profile**: one provider, one name (or whatever one request updates).
+- **HTTPS only** for the provider; plain-HTTP-only providers (DyNS) are
+  not supported.
+- **No STUN**: Tailscale's STUN result is not used as an IP source.
+- **The last IP is not kept across reboots**, so each boot sends one update.
+  The `stopped` state is kept.
+- **Certificate dates are not checked** (the host name and chain are), as for
+  OTA and telemetry: the device may not know the time yet.
+- **CGNAT**: behind carrier-grade NAT the sources report the carrier's
+  public address. The update "works", but nothing can connect in on it.
+- **NVS is not encrypted**, and flash core dumps include task stacks — the
+  same as for the Wi-Fi and Tailscale secrets.
+
+### Providers
+
+The provider survey is based on pfSense CE's DynDNS client. The provider
+list, request shapes and dyndns2 return-code handling come from
+`src/etc/inc/dyndns.class` in pfsense/pfsense `master` at `9363ac5`
+(2026-03-31), the code base for pfSense CE 2.9.0, Apache License 2.0. No
+pfSense code is copied; it served as the reference list and for behaviour.
+
+| Group | Providers |
+|---|---|
+| Single GET (32) | All-Inkl, City Network, ClouDNS, deSEC, DNSexit, DNS Made Easy, DNS-O-Matic, Domeneshop, DuiaDns, DynDNS ×3, Dynv6, easyDNS, EuroDNS, freeDNS v1/v2, GratisDNS, HE.net, HE Tunnelbroker, Loopia, Namecheap, NIC.RU, No-IP, No-IP free, OVH, SelfHost, SPDYN, Strato, ZoneEdit, DY.fi and OpenDNS (both with "source IP") |
+| Single request, not GET (7) | GleSYS, Mythic Beasts (form POST + Basic), GoDaddy (PUT JSON, `sso-key` header), Gandi LiveDNS (PUT JSON + Bearer), DNSimple (PATCH JSON + Bearer, account and record IDs entered by you), Cloudflare (PUT, zone and record IDs entered by you), Porkbun (`editByNameType` JSON POST) |
+| Not supported: multi-step (10) | DigitalOcean, Linode, LuaDNS, Name.com, DreamHost, Yandex, Hover, One.com, Azure, Route 53 |
+| Not supported: other (3) | DyNS (plain HTTP), ODS (raw TCP), Google Domains (shut down) |
+
+That is 39 of pfSense's 52 IPv4 entries. Ready-to-paste settings — replace
+the names, put your secret in the field named, and leave unnamed fields at
+their defaults:
+
+| Provider | Settings |
+|---|---|
+| DuckDNS | URL `https://www.duckdns.org/update?domains=myname&token={token}&ip={ip}` · Token = DuckDNS token · match `OK` |
+| dyndns2 (No-IP) | URL `https://dynupdate.no-ip.com/nic/update?hostname=myhost.ddns.net&myip={ip}` · User / Password = account (or DDNS key) · match `^good|^nochg` |
+| dyndns2 (DynDNS) | URL `https://members.dyndns.org/nic/update?hostname=myhost.dyndns.org&myip={ip}` · User / Password = account (or updater key) · match `^good|^nochg` |
+| deSEC | URL `https://update.dedyn.io/?hostname=myname.dedyn.io&myipv4={ip}&myipv6=preserve` · User = `myname.dedyn.io` · Password = deSEC token · match `^good|^nochg`. Keep `myipv6=preserve`, or deSEC deletes the AAAA record. |
+| Namecheap | URL `https://dynamicdns.park-your-domain.com/update?host=@&domain=example.com&password={pass}&ip={ip}` · Password = Dynamic DNS password (Advanced DNS tab) · match `<ErrCount>0</ErrCount>` |
+| Cloudflare | Method PUT · URL `https://api.cloudflare.com/client/v4/zones/ZONE_ID/dns_records/RECORD_ID` · header `Authorization: Bearer {token}` · body (JSON) `{"type":"A","name":"home.example.com","content":"{ip}","ttl":60,"proxied":false}` · Token = API token with DNS edit · match empty. PUT replaces the whole record, so the body must set every field you want to keep. |
+| GoDaddy | Method PUT · URL `https://api.godaddy.com/v1/domains/example.com/records/A/home` · header `Authorization: sso-key {token}` · body (JSON) `[{"data":"{ip}","ttl":600}]` · Token = `KEY:SECRET` · match empty |
+| ClouDNS | URL `https://ipv4.cloudns.net/api/dynamicURL/?q={token}` · **Provider uses the request's source IP** on · Token = the `q` value of your dynamic URL (it is a secret) |
+| Porkbun | Method POST · URL `https://api.porkbun.com/api/json/v3/dns/editByNameType/example.com/A/home` · body (JSON) `{"secretapikey":"{pass}","apikey":"{token}","content":"{ip}","ttl":"600"}` · Password = secret API key · Token = API key · match empty. `editByNameType` updates **every** A record with that name. |
+
+No-IP free hosts still need the monthly confirmation on the No-IP account;
+the refresh option does not replace it. After the first Save, press
+**Force update now** and look at the provider's answer in the status block
+to confirm the settings.
+
+### Monitoring over SNMP
+
+With [SNMP](#snmp) on, the status is one NET-SNMP-EXTEND-MIB row with
+index `"ddns"` (OID suffix `4.100.100.110.115`), so pollers that know the
+MIB find it on a plain walk:
+
+| Object | OID | Value |
+|---|---|---|
+| `nsExtendOutput1Line."ddns"` | `1.3.6.1.4.1.8072.1.3.2.3.1.1.4.100.100.110.115` | e.g. `ok 84.2.17.203`, `quorum-failed`, `cooldown http 429`, `stopped badauth`, `disabled` |
+| `nsExtendOutputFull."ddns"` | `….3.1.2.4.100.100.110.115` | each source's answer, the last success address and time, the last HTTP status and error; never the provider's answer |
+| `nsExtendOutNumLines."ddns"` | `….3.1.3.4.100.100.110.115` | lines in OutputFull |
+| `nsExtendResult."ddns"` | `….3.1.4.4.100.100.110.115` | 0 ok, 1 disabled, 2 waiting, 3 quorum-failed, 4 provider-error, 5 cooldown, 6 stopped |
+
+The row also has a read-only config part (`….2.2.1.<col>.4.100.100.110.115`)
+for tools that walk it first. Alerting is up to your poller; a useful
+trigger is `nsExtendResult."ddns" >= 3`, for example:
+
+```bash
+snmpget -v2c -c <community> <device-ip> 1.3.6.1.4.1.8072.1.3.2.3.1.4.4.100.100.110.115
+# Zabbix: item on that OID, trigger  last(/esp32-router/ddns.result)>=3
 ```
 
 ## System

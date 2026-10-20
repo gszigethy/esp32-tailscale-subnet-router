@@ -6,6 +6,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- DDNS client: keeps one DNS name pointed at the public IPv4. The address must be agreed by two of three HTTPS IP sources. Any single-request provider works through a URL/header/body template; secrets are write-only. Permanent rejections stop updates and survive a reboot, and 429 and dnserr/911 cooldowns are honoured. The status shows on a new DDNS tab, on the Status page and over SNMP (NET-SNMP-EXTEND-MIB, index `"ddns"`). See `docs/CONFIGURATION.md#ddns`.
+
 ## [0.1.38-beta2+W5500] - 2026-10-20
 
 ### Fork changes

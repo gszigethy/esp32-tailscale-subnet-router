@@ -31,6 +31,7 @@ MODULES = [
     ("routing",        "test_lib.routing"),
     ("dns_relay",      "test_lib.dns_relay"),
     ("system_extras",  "test_lib.system_extras"),
+    ("ddns",           "test_lib.ddns"),
 ]
 
 
