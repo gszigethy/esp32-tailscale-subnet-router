@@ -13,7 +13,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
-import random
+import secrets
 import socket
 import time
 from urllib.parse import urlparse
@@ -86,7 +86,7 @@ def _oid_dec(b: bytes) -> str:
 
 def snmp_getnext(host: str, community: str, oid: str, timeout: float = 3.0):
     """Returns (oid, tag, value) of the successor, value decoded for INTEGER/OCTET STRING."""
-    rid = random.randint(1, 0x7FFFFFFF)
+    rid = 1 + secrets.randbelow(0x7FFFFFFF)
     vb = _tlv(0x30, _oid_enc(oid) + b"\x05\x00")
     pdu = _tlv(0xA1, _int(rid) + _int(0) + _int(0) + _tlv(0x30, vb))
     msg = _tlv(0x30, _int(1) + _tlv(0x04, community.encode()) + pdu)
@@ -208,7 +208,7 @@ def check_validation_errors(results: list[Result], spa: SpaClient) -> None:
                                          {"preset": "aws", "url": ""}]},
         "interval 0": {"interval_min": 0},
         "body with GET": {"method": "GET", "body": "ip={ip}"},
-        "private custom source": {"sources": [{"preset": "custom", "url": "http://192.168.1.1/"},
+        "private custom source": {"sources": [{"preset": "custom", "url": "http://192.168.1.1/"},  # NOSONAR: must be rejected
                                               {"preset": "icanhazip", "url": ""},
                                               {"preset": "aws", "url": ""}]},
     }

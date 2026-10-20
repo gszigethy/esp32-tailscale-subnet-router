@@ -3975,7 +3975,8 @@ static esp_err_t ddns_post_handler(httpd_req_t *req) {
         } else
             c->method = (uint8_t)m;
     }
-    if (ok && cJSON_IsString(j = cJSON_GetObjectItem(root, "body_type"))) {
+    j = cJSON_GetObjectItem(root, "body_type");
+    if (ok && cJSON_IsString(j)) {
         if (strcasecmp(j->valuestring, "json") == 0)
             c->body_type = DDNS_BODY_JSON;
         else if (strcasecmp(j->valuestring, "form") == 0)
@@ -3993,11 +3994,13 @@ static esp_err_t ddns_post_handler(httpd_req_t *req) {
          ddns_take_uint(root, "interval_min", &c->interval_min, msg, sizeof msg) &&
          ddns_take_uint(root, "refresh_days", &c->refresh_days, msg, sizeof msg);
     /* Secrets: absent or empty keeps the stored value; *_clear empties it. */
-    if (ok && cJSON_IsString(j = cJSON_GetObjectItem(root, "pass")) && j->valuestring[0]) {
+    j = cJSON_GetObjectItem(root, "pass");
+    if (ok && cJSON_IsString(j) && j->valuestring[0]) {
         ok = ddns_take_str(root, "pass", c->pass, sizeof c->pass, msg, sizeof msg);
         keep &= ~DDNS_KEEP_PASS;
     }
-    if (ok && cJSON_IsString(j = cJSON_GetObjectItem(root, "token")) && j->valuestring[0]) {
+    j = cJSON_GetObjectItem(root, "token");
+    if (ok && cJSON_IsString(j) && j->valuestring[0]) {
         ok = ddns_take_str(root, "token", c->token, sizeof c->token, msg, sizeof msg);
         keep &= ~DDNS_KEEP_TOKEN;
     }

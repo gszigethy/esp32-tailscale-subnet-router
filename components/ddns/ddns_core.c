@@ -874,7 +874,7 @@ static ddns_err_t check_sources(const ddns_cfg_t *c, int *bad_slot) {
     for (int i = 0; i < 3; i++) {
         *bad_slot = i;
         const char *u = ddns_src_url(c, i);
-        bool is_http = strncmp(u, "http://", 7) == 0;
+        bool is_http = strncmp(u, "http://", 7) == 0; // NOSONAR: detects plain HTTP to limit it
         if (!is_http && strncmp(u, "https://", 8) != 0)
             return DDNS_E_SOURCES;
         char host[128];
@@ -883,7 +883,9 @@ static ddns_err_t check_sources(const ddns_cfg_t *c, int *bad_slot) {
         uint32_t ip;
         if (ddns_ipv4_parse(host, strlen(host), &ip) && !ddns_ipv4_is_public(ip))
             return DDNS_E_SOURCES;
-        if (is_http && ++http > 1)
+        if (is_http)
+            http++;
+        if (http > 1)
             return DDNS_E_SOURCES;
         for (int j = 0; j < i; j++)
             if (strcmp(u, ddns_src_url(c, j)) == 0)

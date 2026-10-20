@@ -143,7 +143,7 @@ static void test_fill_duckdns(void) {
 }
 
 static void test_fill_userinfo_basic(void) {
-    ddns_cfg_t c = cfg_with("https://{user}:{pass}@members.dyndns.org/nic/update?hostname=h&myip={ip}");
+    ddns_cfg_t c = cfg_with("https://{user}:{pass}@members.dyndns.org/nic/update?hostname=h&myip={ip}"); // NOSONAR: placeholders
     strcpy(c.user, "u");
     strcpy(c.pass, "p:w");
     CHECK(ddns_fill(&c, IP4(84, 2, 17, 203), &s_req) == DDNS_OK);
@@ -301,7 +301,7 @@ static void test_validate_accepts_disabled_empty(void) {
 }
 
 static void test_validate_moves_userinfo(void) {
-    ddns_cfg_t c = cfg_with("https://bob:s%40crt@members.dyndns.org/nic/update?myip={ip}");
+    ddns_cfg_t c = cfg_with("https://bob:s%40crt@members.dyndns.org/nic/update?myip={ip}"); // NOSONAR: test fixture
     char msg[128];
     CHECK(validate(&c, msg) == DDNS_OK);
     CHECK(strcmp(c.user, "bob") == 0 && strcmp(c.pass, "s@crt") == 0);
@@ -380,7 +380,7 @@ static void test_validate_private_custom_source(void) {
     ddns_cfg_t c = cfg_with("https://h.example/?ip={ip}");
     char msg[128];
     c.src[2].kind = DDNS_SRC_CUSTOM;
-    strcpy(c.src[2].custom, "http://192.168.1.1/ip");
+    strcpy(c.src[2].custom, "http://192.168.1.1/ip"); // NOSONAR: must be rejected
     CHECK(validate(&c, msg) == DDNS_E_SOURCES);
     strcpy(c.src[2].custom, "https://100.100.100.100/ip");
     CHECK(validate(&c, msg) == DDNS_E_SOURCES);
