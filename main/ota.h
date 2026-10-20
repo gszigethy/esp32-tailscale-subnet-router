@@ -71,6 +71,10 @@ void      ota_poll_now(char *out_status, size_t status_len);
  * Reboots on success. */
 void      ota_install_now(void);
 
+/* True while an install (auto, manual or uploaded image) is in progress, until
+ * that path ends or reboots. Other subsystems use it to stay off the network. */
+bool ota_is_busy(void);
+
 #ifdef __cplusplus
 }
 #endif
