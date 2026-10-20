@@ -1,9 +1,11 @@
 /* lwIP netif hook installer — currently just the ACL packet filter.
  *
- * Wires acl_check_packet into the STA and AP netifs' input + linkoutput
- * chains so the four ACL chains (to_esp / from_esp / to_ap / from_ap)
- * actually drop denied traffic. Idempotent; call once after WiFi has
- * started.
+ * Wires acl_check_packet into the AP netif and both uplink netifs (WiFi STA
+ * and wired ETH) input + linkoutput chains so the four ACL chains
+ * (to_esp / from_esp / to_ap / from_ap) actually drop denied traffic. The two
+ * uplinks share the to_esp/from_esp chains, matching how acl.h defines them
+ * ("uplink input" / "uplink output"). Idempotent; call once after WiFi has
+ * started AND after eth_uplink_init(), so every netif exists.
  *
  * Future hooks (byte counters, TTL override, kill switch)
  * land here too, sharing the same install/save-original-fn pattern.
@@ -13,12 +15,17 @@
 #pragma once
 
 #include <stdint.h>
+#include "lwip/err.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 void netif_hooks_init(void);
+/* W5500 fork: lwIP init_fn for the ETH netif. Wraps ethernetif_init() and
+ * installs the ETH firewall/TTL/counter hooks inside every netif_add(). */
+struct netif;
+err_t netif_hooks_eth_netif_init(struct netif *netif);
 
 /* Wire-byte counters — accumulated in the four hook tap points before
  * the ACL check, so they represent everything that actually hit the
@@ -27,9 +34,12 @@ uint64_t netif_hooks_get_sta_bytes_in (void);
 uint64_t netif_hooks_get_sta_bytes_out(void);
 uint64_t netif_hooks_get_ap_bytes_in  (void);
 uint64_t netif_hooks_get_ap_bytes_out (void);
+uint64_t netif_hooks_get_eth_bytes_in (void);
+uint64_t netif_hooks_get_eth_bytes_out(void);
 
-/* TTL hop-limit override on the STA upstream. When non-zero, every
- * outgoing IPv4 frame on the STA interface gets its TTL field rewritten
+/* TTL hop-limit override on the uplink (applies to WiFi STA and wired ETH
+ * alike; the name is kept for the NVS key and API compatibility). When
+ * non-zero, every outgoing IPv4 frame on an uplink gets its TTL rewritten
  * to this value (with an RFC 1624 incremental checksum update) before
  * leaving the radio. 0 disables the override — the IP stack's natural
  * 64-default TTL passes through unchanged. Typical use: cloak a tethered

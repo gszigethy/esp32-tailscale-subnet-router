@@ -18,6 +18,7 @@
 #include "lwip/prot/tcp.h"
 
 #include "acl.h"
+#include "lwip/esp_netif_net_stack.h"   /* ethernetif_init() */
 #include "netif_hooks.h"
 
 /* MTU-management knobs published by tailscale_mtu.c. ap_mss_clamp is
@@ -38,6 +39,8 @@ static netif_input_fn       original_sta_input       = NULL;
 static netif_linkoutput_fn  original_sta_linkoutput  = NULL;
 static netif_input_fn       original_ap_input        = NULL;
 static netif_linkoutput_fn  original_ap_linkoutput   = NULL;
+static netif_input_fn       original_eth_input       = NULL;
+static netif_linkoutput_fn  original_eth_linkoutput  = NULL;
 
 /* Wire-byte counters. Updated on the LWIP TCPIP task, read from the
  * HTTP server task. Display-only — torn reads at the 32-bit boundary
@@ -46,11 +49,15 @@ static volatile uint64_t s_sta_bytes_in  = 0;
 static volatile uint64_t s_sta_bytes_out = 0;
 static volatile uint64_t s_ap_bytes_in   = 0;
 static volatile uint64_t s_ap_bytes_out  = 0;
+static volatile uint64_t s_eth_bytes_in  = 0;
+static volatile uint64_t s_eth_bytes_out = 0;
 
 uint64_t netif_hooks_get_sta_bytes_in (void) { return s_sta_bytes_in;  }
 uint64_t netif_hooks_get_sta_bytes_out(void) { return s_sta_bytes_out; }
 uint64_t netif_hooks_get_ap_bytes_in  (void) { return s_ap_bytes_in;   }
 uint64_t netif_hooks_get_ap_bytes_out (void) { return s_ap_bytes_out;  }
+uint64_t netif_hooks_get_eth_bytes_in (void) { return s_eth_bytes_in;  }
+uint64_t netif_hooks_get_eth_bytes_out(void) { return s_eth_bytes_out; }
 
 /* TTL override (0 = pass through). Read on every STA-out packet, set
  * by the /api/network POST handler + the boot-time NVS load. Single
@@ -245,6 +252,29 @@ static err_t sta_linkoutput_hook(struct netif *netif, struct pbuf *p)
     return original_sta_linkoutput ? original_sta_linkoutput(netif, p) : ERR_VAL;
 }
 
+/* Wired uplink. Shares the ACL_TO_ESP / ACL_FROM_ESP chains with WiFi STA
+ * because those chains are defined as "uplink input/output" (acl.h), not as
+ * WiFi-specific — the firewall UI calls them to_esp / from_esp for exactly
+ * that reason. Until these hooks existed, ETH was simply not filtered: on a
+ * wired-first device every to_esp/from_esp rule the operator wrote was
+ * accepted by the UI, persisted to NVS, displayed as active, and enforced on
+ * nothing. The TTL override was equally inert. */
+static err_t eth_input_hook(struct pbuf *p, struct netif *netif)
+{
+    if (p) s_eth_bytes_in += p->tot_len;
+    if (acl_drops(acl_check_and_tap(ACL_TO_ESP, p, false))) { pbuf_free(p); return ERR_OK; }
+    return original_eth_input ? original_eth_input(p, netif) : ERR_VAL;
+}
+
+static err_t eth_linkoutput_hook(struct netif *netif, struct pbuf *p)
+{
+    if (p) s_eth_bytes_out += p->tot_len;
+    /* Before the ACL check, so rules see what actually goes out the wire. */
+    apply_sta_ttl_override(p);
+    if (acl_drops(acl_check_and_tap(ACL_FROM_ESP, p, false))) { return ERR_OK; }
+    return original_eth_linkoutput ? original_eth_linkoutput(netif, p) : ERR_VAL;
+}
+
 static err_t ap_input_hook(struct pbuf *p, struct netif *netif)
 {
     if (p) s_ap_bytes_in += p->tot_len;
@@ -269,6 +299,32 @@ static err_t ap_linkoutput_hook(struct netif *netif, struct pbuf *p)
     return original_ap_linkoutput ? original_ap_linkoutput(netif, p) : ERR_VAL;
 }
 
+/* lwIP init_fn for the ETH netif (eth_uplink.c puts it in the netif's
+ * esp_netif_netstack_config_t). netif_add() assigns netif->input
+ * (tcpip_input) and then calls this, and ethernetif_init() sets
+ * ->linkoutput, so wrapping both here makes the hooks part of creating the
+ * netif:
+ *   - every ETH (re)start runs netif_add() and therefore this again, so
+ *     "Use as uplink" off/on can no longer silently drop the firewall, TTL
+ *     override and counters;
+ *   - it happens before any other module can see the netif, so the SNMP
+ *     agent's counter wrappers always stack on top of these hooks. Patching
+ *     the pointers after the fact instead (0.1.28-beta4) could not tell an
+ *     SNMP wrapper from a missing hook, re-wrapped it, and the two then
+ *     called each other until the stack overflowed into the heap. */
+err_t netif_hooks_eth_netif_init(struct netif *netif)
+{
+    err_t err = ethernetif_init(netif);
+    if (err != ERR_OK) return err;
+    original_eth_input      = netif->input;
+    original_eth_linkoutput = netif->linkoutput;
+    netif->input            = eth_input_hook;
+    netif->linkoutput       = eth_linkoutput_hook;
+    ESP_LOGI(TAG, "ETH hooks installed on %c%c%d",
+             netif->name[0], netif->name[1], netif->num);
+    return ERR_OK;
+}
+
 void netif_hooks_init(void)
 {
     static bool installed = false;
@@ -276,6 +332,8 @@ void netif_hooks_init(void)
 
     esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     esp_netif_t *ap  = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    /* ETH is not patched here: its hooks are installed by its own lwIP
+     * init_fn (netif_hooks_eth_netif_init above) on every netif_add(). */
 
     if (sta) {
         struct netif *nif = esp_netif_get_netif_impl(sta);
@@ -297,6 +355,7 @@ void netif_hooks_init(void)
             ESP_LOGI(TAG, "AP hooks installed on %c%c%d", nif->name[0], nif->name[1], nif->num);
         }
     }
+
 
     installed = (sta != NULL) || (ap != NULL);
 }
