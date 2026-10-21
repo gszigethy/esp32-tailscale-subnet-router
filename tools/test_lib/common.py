@@ -89,7 +89,13 @@ class SpaClient:
             raise RuntimeError("playwright not installed (`pip install playwright && playwright install chromium`)")
         self.ctx = ctx
         self._pw  = sync_playwright().start()
-        self._br  = self._pw.chromium.launch(headless=True)
+        # PLAYWRIGHT_CDP=ws://host:port/ uses a remote Chrome (e.g. browserless /
+        # sockpuppetbrowser) over CDP instead of a locally installed one.
+        cdp = os.environ.get("PLAYWRIGHT_CDP")
+        if cdp:
+            self._br = self._pw.chromium.connect_over_cdp(cdp, timeout=20000)
+        else:
+            self._br = self._pw.chromium.launch(headless=True)
         self._cx  = self._br.new_context()
         self.page = self._cx.new_page()
         self.console_errors: list[tuple[str, str]] = []

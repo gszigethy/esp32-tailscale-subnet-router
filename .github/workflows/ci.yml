@@ -66,6 +66,19 @@ jobs:
           pio run -e esp32-s3 | tee "$SIZE_DIR/head-size.txt"
           stat -c '%s' .pio/build/esp32-s3/firmware.bin > "$SIZE_DIR/head-bytes.txt"
 
+      - name: Test DDNS core and HTTP transport on host
+        run: |
+          make -C tools/ddns_host_test test
+          python tools/test_ddns_http.py
+
+      - name: Set up Node.js for DDNS page regression
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Test DDNS status polling preserves edits
+        run: node tools/test_ddns_ui.cjs
+
       - name: Verify firmware image
         run: |
           test -s .pio/build/esp32-s3/firmware.bin
