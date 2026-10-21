@@ -28,7 +28,7 @@ typedef struct {
 } ip_addr_t;
 typedef void (*dns_found_callback)(const char *, const ip_addr_t *, void *);
 typedef struct {
-    int unused;
+    bool plain, select_timed_out;
 } esp_tls_t;
 typedef struct {
     bool non_block, is_plain_tcp;

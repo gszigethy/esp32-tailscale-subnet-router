@@ -174,7 +174,9 @@ static bool write_all(esp_tls_t *tls, const char *s, size_t len, int64_t deadlin
         ssize_t n = esp_tls_conn_write(tls, s + sent, len - sent);
         if (n > 0)
             sent += (size_t)n;
-        else if (!would_block(n))
+        /* ESP-TLS returns plain-TCP success before a nonblocking connect finishes. lwIP's
+         * send() reports EINPROGRESS until that connection completes; retry within the deadline. */
+        else if (!would_block(n) && !(n < 0 && errno == EINPROGRESS))
             return false;
         else
             vTaskDelay(1);
@@ -230,7 +232,6 @@ int ddns_http_exchange(const char *url, ddns_method_t method, const ddns_req_t *
     else
         strlcpy(host_header, host, sizeof host_header);
     esp_tls_cfg_t cfg = {.non_block = true,
-                         .timeout_ms = 1,
                          .is_plain_tcp = !https,
                          .common_name = host,
                          .crt_bundle_attach = https ? esp_crt_bundle_attach : NULL};
@@ -239,6 +240,13 @@ int ddns_http_exchange(const char *url, ddns_method_t method, const ddns_req_t *
         goto out;
     int connected = 0;
     while (esp_timer_get_time() < deadline) {
+        /* ESP-IDF 5.5's CONNECTING state reuses select()'s fd_sets. A short timeout clears
+         * those sets and strands later polls, so the first select must get the remaining
+         * budget. The TLS handshake and subsequent I/O still use the nonblocking socket. */
+        int64_t remaining_us = deadline - esp_timer_get_time();
+        if (remaining_us <= 0)
+            break;
+        cfg.timeout_ms = (int)((remaining_us + 999) / 1000);
         connected = esp_tls_conn_new_async(addr, strlen(addr), port, &cfg, tls);
         if (connected != 0)
             break;

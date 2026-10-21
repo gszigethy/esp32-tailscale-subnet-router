@@ -276,7 +276,9 @@ The HTTP test requires the ESP-IDF package installed by `pio run -e esp32-s3`.
 It runs the production transport and ESP-IDF HTTP parser with deterministic
 DNS/TLS fakes under AddressSanitizer and UBSan: deadline expiry during DNS,
 connection, partial writes, trickled headers and stalled bodies; late DNS
-completion; chunked and close-delimited answers; custom headers and the
+completion; ESP-IDF's destructive `select` timeout and plain-TCP `EINPROGRESS`
+while connecting; shared DNS/TCP/TLS/body deadlines; chunked and close-delimited
+answers; custom headers and the
 public-address policy. The browser regression runs the actual DDNS script
 with a small DOM and fake timers to check that Force and periodic status
 refresh preserve edits, secrets and Save state, avoid overlapping polls,

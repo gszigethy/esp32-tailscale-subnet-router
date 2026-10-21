@@ -2,9 +2,11 @@
 #include "ddns_http.h"
 #include "http_shim.h"
 #include <assert.h>
+#include <errno.h>
 #include <stdio.h>
 
-static int64_t now_us, connect_at, read_at, byte_interval;
+static int64_t now_us, connect_at, handshake_at, read_at, byte_interval, dns_delay_us;
+static int pending_writes, write_error;
 static const char *answer;
 static size_t answer_pos, answer_step;
 static char request[4096];
@@ -67,14 +69,40 @@ int esp_tls_conn_destroy(esp_tls_t *tls) {
 }
 int esp_tls_conn_new_async(const char *host, int len, int port, const esp_tls_cfg_t *cfg, esp_tls_t *tls) {
     (void)len;
-    (void)tls;
     assert(strcmp(host, "8.8.8.8") == 0); /* The validated IP is used, never a second DNS lookup. */
     assert(strcmp(cfg->common_name, "h.example") == 0 || strcmp(cfg->common_name, "8.8.8.8") == 0);
     assert(cfg->non_block && (port == 443 || port == 8443 || port == 80));
-    return now_us >= connect_at;
+    /* Model ESP-IDF 5.5's first CONNECTING select and the destructive fd_set timeout.
+     * A too-short wait permanently strands this connection, even when the SYN/ACK arrives. */
+    assert(cfg->timeout_ms > 0 && cfg->timeout_ms <= (20000001 - now_us + 999) / 1000);
+    tls->plain = cfg->is_plain_tcp;
+    if (tls->plain)
+        return 1; /* ESP-TLS plain TCP returns before the nonblocking connect completes. */
+    if (tls->select_timed_out) {
+        now_us += (int64_t)cfg->timeout_ms * 1000;
+        return 0;
+    }
+    if (now_us < connect_at) {
+        int64_t wait_us = (int64_t)cfg->timeout_ms * 1000;
+        if (wait_us < connect_at - now_us) {
+            now_us += wait_us;
+            tls->select_timed_out = true;
+            return 0;
+        }
+        now_us = connect_at;
+    }
+    return now_us >= handshake_at;
 }
 ssize_t esp_tls_conn_write(esp_tls_t *tls, const void *buf, size_t len) {
-    (void)tls;
+    if (tls->plain && now_us < connect_at) {
+        pending_writes++;
+        errno = EINPROGRESS;
+        return -1;
+    }
+    if (write_error) {
+        errno = write_error;
+        return -1;
+    }
     if (writes_before_block == 0)
         return ESP_TLS_ERR_SSL_WANT_WRITE;
     if (writes_before_block > 0)
@@ -100,6 +128,7 @@ ssize_t esp_tls_conn_read(esp_tls_t *tls, void *buf, size_t len) {
     return (ssize_t)copy;
 }
 err_t tcpip_try_callback(void (*cb)(void *), void *arg) {
+    now_us += dns_delay_us;
     cb(arg);
     return ERR_OK;
 }
@@ -118,6 +147,10 @@ static void on_written(void) { released++; }
 static void reset(const char *text) {
     now_us = 1;
     connect_at = 0;
+    handshake_at = 0;
+    dns_delay_us = 0;
+    pending_writes = 0;
+    write_error = 0;
     read_at = 0;
     byte_interval = 0;
     answer = text;
@@ -246,6 +279,41 @@ int main(void) {
     reset("HTTP/1.1 100 Continue\r\nRetry-After: 999\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
     CHECK(exchange("https://h.example/", NULL, resp, sizeof resp, &len, &timeout, ra) == 200);
     CHECK(!timeout && len == 2 && !ra[0] && released == 1);
+
+    reset("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
+    connect_at = 50001; /* Real public TCP round trips exceed the former 1 ms select timeout. */
+    handshake_at = 100001;
+    CHECK(exchange("https://h.example/", NULL, resp, sizeof resp, &len, &timeout, ra) == 200);
+    CHECK(!timeout && len == 2 && now_us >= handshake_at && released == 1);
+
+    reset("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
+    connect_at = 50001;
+    CHECK(exchange("http://h.example/", NULL, resp, sizeof resp, &len, &timeout, ra) == 200); // NOSONAR: HTTP fixture
+    CHECK(!timeout && len == 2 && pending_writes > 0 && now_us >= connect_at && released == 1);
+
+    reset("");
+    connect_at = 30000000;
+    CHECK(exchange("http://h.example/", NULL, resp, sizeof resp, &len, &timeout, ra) < 0); // NOSONAR: HTTP fixture
+    CHECK(timeout && now_us <= 20001001 && request_len == 0 && pending_writes > 0 && released == 1);
+
+    reset("");
+    write_error = ECONNREFUSED;
+    CHECK(exchange("http://h.example/", NULL, resp, sizeof resp, &len, &timeout, ra) < 0); // NOSONAR: HTTP fixture
+    CHECK(!timeout && now_us == 1 && request_len == 0 && released == 1); /* Hard errors do not spin. */
+
+    reset("");
+    connect_at = 50001;
+    handshake_at = 30000000;
+    CHECK(exchange("https://h.example/", NULL, resp, sizeof resp, &len, &timeout, ra) < 0);
+    CHECK(timeout && now_us <= 20001001 && request_len == 0 && released == 1);
+
+    reset("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nOK");
+    dns_delay_us = 5000000;
+    connect_at = 10000001;
+    handshake_at = 15000001;
+    stall_body = true;
+    CHECK(exchange("https://h.example/", NULL, resp, sizeof resp, &len, &timeout, ra) == 200);
+    CHECK(timeout && now_us <= 20001001 && len == 2 && released == 1); /* DNS/TCP/TLS/body share the deadline. */
 
     CHECK(live_semaphores == 0);
     printf("all HTTP transport tests passed (%d checks)\n", checks);
