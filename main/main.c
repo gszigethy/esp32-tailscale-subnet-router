@@ -64,6 +64,8 @@
 #include "cli.h"
 #include "esp_ota_ops.h"
 
+#include "ddns.h"
+
 /* The examples use WiFi configuration that you can set via project configuration menu.
 
    If you'd rather not, just change the below entries to strings with
@@ -141,8 +143,22 @@ volatile int eth_connect = 0;
 
 static void uplink_state_changed(void)
 {
+    static int last_sta = -1, last_eth = -1;
     ap_connect = (sta_connect || eth_connect) ? 1 : 0;
+    /* Called on every STA retry too: tell DDNS only about a real transition,
+     * or a retrying backup SSID would void every check (new uplink epoch). */
+    if (sta_connect != last_sta || eth_connect != last_eth) {
+        last_sta = sta_connect;
+        last_eth = eth_connect;
+        ddns_notify_uplink_changed(); /* failover: new uplink epoch, WAN-up check */
+    }
 }
+
+static bool ddns_uplink_up(void) { return ap_connect != 0; }
+static const ddns_platform_t s_ddns_platform = {
+    .uplink_up = ddns_uplink_up,
+    .ota_busy = ota_is_busy,
+};
 
 /* Ask for a Tailscale (re)connect. Called whenever the path the tunnel runs
  * over, or the set of advertised routes, changes. tailscale_connect_task
@@ -1256,6 +1272,7 @@ void app_main(void)
      * other after SNMP's next scan. SNMP still starts before the web UI so
      * its temperature-sensor owner is ready for status requests. */
     snmp_agent_init();
+    ddns_init(&s_ddns_platform);
 
     /* STA TTL hop-limit override — 0 = passthrough, else every outgoing
      * IPv4 frame's TTL is rewritten to this value. Operator config from
