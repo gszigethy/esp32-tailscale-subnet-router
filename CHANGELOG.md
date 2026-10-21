@@ -4,7 +4,30 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.38-beta4+W5500] - 2026-10-21
+
+### Fork changes
+- Fix HTTPS connection completion: ESP-TLS gets the remaining request budget for its first `select`, avoiding the short-timeout fd-set trap. Plain-HTTP IP sources retry lwIP's `EINPROGRESS` while connecting.
+- Enforce one 20-second deadline across asynchronous DNS and nonblocking TLS/HTTP. Reuse the validated public IPv4 while preserving the hostname for TLS and HTTP.
+- Save returns busy after a 200 ms dispatch-lock wait instead of blocking the web server. Validate real credential encoding and the longest IPv4 before saving.
+- Refresh DDNS status every five seconds without overwriting unsaved settings or typed secrets, including after Force.
+- Document the DDNS SNMP status in LibreNMS. Changes are tracked in PR #22; DDNS remains off by default.
+
+### Validation
+- 246 core checks, 55 HTTP transport checks, the DDNS browser regression and W5500 host checks pass. Restoring either connection bug makes the transport regression suite fail.
+- Firmware build, static analysis and changed-line formatting pass. Claude independently checked the two connection fixes against ESP-IDF 5.5.3 and found no new actionable issue.
+- This version has not been tested on a device. OTA, a real DDNS provider, wired-to-Wi-Fi failover and exit-node behavior remain pending device confirmation before stable promotion.
+
+## [0.1.38-beta3+W5500] - 2026-10-20
+
+### Fork changes
+- DDNS client: keeps one DNS name pointed at the public IPv4. The address must be agreed by two of three HTTPS IP sources. Any single-request provider works through a URL/header/body template; secrets are write-only. Permanent rejections stop updates and survive a reboot, and 429 and dnserr/911 cooldowns are honoured. The status shows on a new DDNS tab, on the Status page and over SNMP (NET-SNMP-EXTEND-MIB, index `"ddns"`). See `docs/CONFIGURATION.md#ddns`.
+- The DDNS client is generic (no W5500 code) and is intended for upstream as its own PR; only its uplink wiring in `main.c` is fork-specific.
+
+### Validation
+- Initial implementation host tests: 241/241. Device (ESP32-S3, W5500 wired uplink): the `ddns` module passes with live internet checks and the Wi-Fi retry check; the exit-node quorum check is not run on this bench.
+- Internal heap low-water mark with DDNS enabled after one update: 5,635 bytes (5,411 bytes on beta2 with DDNS off).
+- Prerelease; device confirmation of OTA, wired uplink, tunnel, failover/reconnect and DDNS with a real provider is required before stable promotion.
 
 ## [0.1.38-beta2+W5500] - 2026-10-20
 
