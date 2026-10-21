@@ -6,9 +6,10 @@
  * SPDX-License-Identifier: MIT
  */
 #pragma once
+#include "esp_err.h"
 #include <stdbool.h>
 #include <stddef.h>
-#include "esp_err.h"
+#include <stdint.h>
 
 /* Legacy NVS keys are read at boot for migration. New saves use one blob. */
 #define SNMP_NVS_KEY_EN       "snmp_en"
@@ -60,3 +61,16 @@ void snmp_agent_get_config(bool *enabled_out, bool *running_out,
  * no temperature at all while logging "Already installed" on every status
  * poll. Safe to call from any task. */
 bool snmp_agent_chip_temp_c(float *out_c);
+
+/* NET-SNMP-EXTEND-MIB (1.3.6.1.4.1.8072.1.3.2) output for one entry. */
+typedef struct {
+    char line1[64];    /* nsExtendOutput1Line */
+    char full[256];    /* nsExtendOutputFull, at most 255 bytes */
+    int32_t num_lines; /* nsExtendOutNumLines */
+    int32_t result;    /* nsExtendResult */
+} snmp_extend_snapshot_t;
+typedef void (*snmp_extend_fill_fn)(snmp_extend_snapshot_t *out);
+
+/* Registers the source for the single extend row with index "ddns". Safe
+ * before or after snmp_agent_init. Called on the SNMP task, once per PDU. */
+void snmp_agent_set_ddns_source(snmp_extend_fill_fn fill);
