@@ -1414,6 +1414,13 @@
         </svg>
         Firewall
       </a>
+      <a class="nav-tab" role="tab" data-page="ddns" aria-selected="false" href="#ddns">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <path d="M12 6v6l4 2"/>
+        </svg>
+        DDNS
+      </a>
       <a class="nav-tab" role="tab" data-page="tools" aria-selected="false" href="#tools">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/>
@@ -1623,6 +1630,11 @@
               <span class="badge badge-neutral" id="eth-route-badge">—</span>
               <span class="mono" id="eth-route-cidr" style="font-size:0.85rem;"></span>
             </span>
+          </div>
+          <!-- Moved by applyStatus() into whichever uplink card is active. -->
+          <div class="stat-row" id="ddns-row">
+            <span class="stat-label" id="ddns-row-label">DDNS</span>
+            <span class="stat-value mono" id="ddns-row-text">—</span>
           </div>
           <div class="stat-row" style="padding-top:0.5rem; border-top:1px solid var(--border);">
             <span class="stat-label" style="align-self:center;">Auto-route</span>
@@ -2382,6 +2394,179 @@
       </div>
       <div id="fw-lists">
         <div style="padding:1.5rem; text-align:center; color:var(--text-muted);">Loading…</div>
+      </div>
+    </div>
+
+    <!-- =================================================================
+         DDNS PAGE
+         =============================================================== -->
+    <div class="page-section" id="page-ddns">
+      <div class="page-header">
+        <div class="page-header-left">
+          <h1 class="page-title">DDNS</h1>
+          <p class="page-subtitle">Keeps a DNS name pointed at the public IPv4 · 2 of 3 IP sources must agree</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <div class="card-header-left">
+            <span class="card-title">Dynamic DNS</span>
+          </div>
+          <span class="badge badge-neutral" id="ddns-badge">—</span>
+        </div>
+        <div class="card-body">
+          <div class="form-group">
+            <label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer;">
+              <input type="checkbox" id="ddns-enabled"> Enabled
+            </label>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="ddns-url">Update URL</label>
+            <input class="input mono" type="text" id="ddns-url" maxlength="256" placeholder="https://www.duckdns.org/update?domains=myname&amp;token={token}&amp;ip={ip}">
+            <span class="form-hint">Placeholders: {ip} {user} {pass} {token}. Put secrets in the fields below, not in the URL. Limits: IPv4 only, one request per update, HTTPS only, certificate dates are not checked.</span>
+          </div>
+          <div class="form-group">
+            <label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer;">
+              <input type="checkbox" id="ddns-src-ip"> Provider uses the request's source IP
+            </label>
+            <span class="form-hint">For providers that take the address from the connection instead of an {ip} parameter.</span>
+          </div>
+          <details id="ddns-adv" style="margin-bottom:1rem;">
+            <summary style="cursor:pointer; color:var(--fg-secondary);">Advanced request</summary>
+            <div style="padding-top:0.75rem;">
+              <div class="grid grid-cols-2">
+                <div class="form-group">
+                  <label class="form-label" for="ddns-method">Method</label>
+                  <select class="input" id="ddns-method">
+                    <option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="ddns-header">Extra header</label>
+                  <input class="input mono" type="text" id="ddns-header" maxlength="256" placeholder="Authorization: Bearer {token}">
+                </div>
+              </div>
+              <div id="ddns-body-wrap">
+                <div class="form-group">
+                  <label class="form-label" for="ddns-body">Body template</label>
+                  <textarea class="input mono" id="ddns-body" rows="3" maxlength="512" placeholder='{"ip":"{ip}"}'></textarea>
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="ddns-body-type">Body type</label>
+                  <select class="input" id="ddns-body-type">
+                    <option value="form">Form (application/x-www-form-urlencoded)</option>
+                    <option value="json">JSON (application/json)</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </details>
+          <div class="form-group">
+            <label class="form-label" for="ddns-user">User</label>
+            <input class="input mono" type="text" id="ddns-user" maxlength="64" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="ddns-pass">Password</label>
+            <div style="display:flex; gap:0.5rem;">
+              <input class="input mono" type="password" id="ddns-pass" maxlength="128" autocomplete="new-password" placeholder="Not set" style="flex:1; min-width:0;">
+              <button class="btn btn-secondary btn-md" type="button" id="ddns-pass-show" title="Show / hide what you typed">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                  <circle cx="12" cy="12" r="3"/>
+                </svg>
+              </button>
+              <button class="btn btn-ghost btn-md" type="button" id="ddns-pass-clear" title="Remove the stored value on Save">Clear</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="ddns-token">Token</label>
+            <div style="display:flex; gap:0.5rem;">
+              <input class="input mono" type="password" id="ddns-token" maxlength="128" autocomplete="new-password" placeholder="Not set" style="flex:1; min-width:0;">
+              <button class="btn btn-secondary btn-md" type="button" id="ddns-token-show" title="Show / hide what you typed">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                  <circle cx="12" cy="12" r="3"/>
+                </svg>
+              </button>
+              <button class="btn btn-ghost btn-md" type="button" id="ddns-token-clear" title="Remove the stored value on Save">Clear</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="ddns-match">Success if response contains</label>
+            <input class="input mono" type="text" id="ddns-match" maxlength="64">
+            <span class="form-hint">For example <span class="mono">^good|^nochg</span>, <span class="mono">OK</span> or <span class="mono">&lt;ErrCount&gt;0&lt;/ErrCount&gt;</span>. Empty = any 2xx answer counts as success.</span>
+          </div>
+          <div class="grid grid-cols-3">
+            <div class="form-group">
+              <label class="form-label" for="ddns-src1">IP source 1</label>
+              <select class="input" id="ddns-src1">
+                <option value="ipify">api.ipify.org</option>
+                <option value="icanhazip">ipv4.icanhazip.com</option>
+                <option value="aws">checkip.amazonaws.com</option>
+                <option value="ifconfig">ifconfig.me</option>
+                <option value="custom">Custom URL</option>
+              </select>
+              <input class="input mono" type="text" id="ddns-src1-url" aria-label="IP source 1 custom URL" placeholder="https://… (returns the IPv4 as text)" maxlength="128" style="display:none; margin-top:0.4rem;">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="ddns-src2">IP source 2</label>
+              <select class="input" id="ddns-src2">
+                <option value="ipify">api.ipify.org</option>
+                <option value="icanhazip">ipv4.icanhazip.com</option>
+                <option value="aws">checkip.amazonaws.com</option>
+                <option value="ifconfig">ifconfig.me</option>
+                <option value="custom">Custom URL</option>
+              </select>
+              <input class="input mono" type="text" id="ddns-src2-url" aria-label="IP source 2 custom URL" placeholder="https://… (returns the IPv4 as text)" maxlength="128" style="display:none; margin-top:0.4rem;">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="ddns-src3">IP source 3</label>
+              <select class="input" id="ddns-src3">
+                <option value="ipify">api.ipify.org</option>
+                <option value="icanhazip">ipv4.icanhazip.com</option>
+                <option value="aws">checkip.amazonaws.com</option>
+                <option value="ifconfig">ifconfig.me</option>
+                <option value="custom">Custom URL</option>
+              </select>
+              <input class="input mono" type="text" id="ddns-src3-url" aria-label="IP source 3 custom URL" placeholder="https://… (returns the IPv4 as text)" maxlength="128" style="display:none; margin-top:0.4rem;">
+            </div>
+          </div>
+          <div class="grid grid-cols-3">
+            <div class="form-group">
+              <label class="form-label" for="ddns-interval">Check every N min</label>
+              <input class="input" type="number" id="ddns-interval" min="1" max="1440">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="ddns-refresh">Refresh every N days</label>
+              <input class="input" type="number" id="ddns-refresh" min="0" max="365">
+              <span class="form-hint">Re-sends an unchanged IP. 0 = never.</span>
+            </div>
+            <div class="form-group" style="align-self:center;">
+              <label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer;">
+                <input type="checkbox" id="ddns-wan"> Also when WAN gets an IP
+              </label>
+            </div>
+          </div>
+          <div class="stat-list" id="ddns-status" style="border-top:1px solid var(--border); padding-top:0.5rem;">
+            <div class="stat-row"><span class="stat-label">State</span><span class="stat-value" id="ddns-st-state">—</span></div>
+            <div class="stat-row"><span class="stat-label">IP source 1</span><span class="stat-value mono" id="ddns-st-src1">—</span></div>
+            <div class="stat-row"><span class="stat-label">IP source 2</span><span class="stat-value mono" id="ddns-st-src2">—</span></div>
+            <div class="stat-row"><span class="stat-label">IP source 3</span><span class="stat-value mono" id="ddns-st-src3">—</span></div>
+            <div class="stat-row"><span class="stat-label">Agreed IP</span><span class="stat-value mono" id="ddns-st-quorum">—</span></div>
+            <div class="stat-row"><span class="stat-label">Last success</span><span class="stat-value mono" id="ddns-st-last-ok">—</span></div>
+            <div class="stat-row"><span class="stat-label">Last HTTP</span><span class="stat-value mono" id="ddns-st-http">—</span></div>
+            <div class="stat-row"><span class="stat-label">Response</span><span class="stat-value"><code id="ddns-st-snippet" style="white-space:pre-wrap; word-break:break-all;">—</code></span></div>
+            <div class="stat-row"><span class="stat-label">Next check</span><span class="stat-value" id="ddns-st-next">—</span></div>
+            <div class="stat-row" id="ddns-st-cooldown-row" style="display:none;"><span class="stat-label">Cooldown</span><span class="stat-value" id="ddns-st-cooldown">—</span></div>
+          </div>
+        </div>
+        <div class="form-footer">
+          <span class="form-footer-hint" id="ddns-footer-hint">Applies immediately, no restart.</span>
+          <div class="form-footer-actions">
+            <button class="btn btn-secondary btn-md" id="ddns-force" type="button">Force update now</button>
+            <button class="btn btn-primary btn-md" id="ddns-save" type="button" disabled>Save</button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -3165,6 +3350,7 @@
         if (page === 'network'   && typeof loadNetwork   === 'function') loadNetwork();
         if (page === 'tailscale' && typeof loadTailscale === 'function') loadTailscale();
         if (page === 'firewall'  && typeof loadFirewall  === 'function') loadFirewall();
+        if (page === 'ddns'      && typeof loadDdns      === 'function') loadDdns();
         if (page === 'system'    && typeof loadSystem    === 'function') loadSystem();
         if (page === 'tools'     && typeof loadDiag      === 'function') loadDiag();
         if (page === 'tools'     && typeof loadPrecrashLog === 'function') loadPrecrashLog();
@@ -3394,6 +3580,28 @@
       return '↓ ' + formatBytes(bin || 0) + '   ↑ ' + formatBytes(bout || 0);
     }
 
+    /* One "DDNS" row, moved into whichever uplink card is carrying traffic
+     * (wired when it is up, WiFi otherwise). Values only via textContent. */
+    function applyDdnsRow(data) {
+      var row = document.getElementById('ddns-row');
+      if (!row) return;
+      var wired = !!(data.eth && data.eth.connected);
+      var anchor = document.getElementById(wired ? 'eth-route-en-toggle' : 'sta-route-en-toggle');
+      anchor = anchor && anchor.closest('.stat-row');
+      if (anchor && row.nextElementSibling !== anchor) anchor.parentNode.insertBefore(row, anchor);
+      /* Reads as one sentence: "Public IP <ip> · DDNS <host> <state> · updated <age> ago"
+       * or "DDNS disabled". */
+      var d = data.ddns || {};
+      var on = d.state && d.state !== 'disabled';
+      var text = 'disabled';
+      if (on) {
+        text = (d.quorum_ip || '—') + ' · DDNS ' + (d.provider_host || '?') + ' ' + d.state;
+        if (d.last_ok_age_s >= 0) text += ' · updated ' + ddnsDur(d.last_ok_age_s) + ' ago';
+      }
+      document.getElementById('ddns-row-label').textContent = on ? 'Public IP' : 'DDNS';
+      document.getElementById('ddns-row-text').textContent = text;
+    }
+
     function applyStatus(data) {
       // STA (uplink)
       var ul = data.sta || {};
@@ -3462,6 +3670,8 @@
           staRouteToggle.checked = !!ul.route_en;
         }
       }
+
+      applyDdnsRow(data);
 
       // ETH (wired uplink)
       var eth = data.eth || {};
@@ -6213,6 +6423,245 @@
     }
 
     document.getElementById('fw-reload').addEventListener('click', loadFirewall);
+
+    // =====================================================================
+    // DDNS PAGE
+    // =====================================================================
+    /* Every device value lands via .value / .checked / textContent. The
+     * stored password and token are never sent to the browser: the inputs
+     * start empty, so the eye only ever reveals what was typed here. */
+    var s_ddns_clear = { pass: false, token: false };
+    var s_ddns_secret = { pass: { set: false, len: 0 }, token: { set: false, len: 0 } };
+    var s_ddns_force_left = 0;
+    var s_ddns_force_timer = null;
+
+    function ddnsDur(sec) {
+      sec = Math.max(0, Math.round(sec));
+      return sec < 60 ? sec + ' s' : formatUptime(sec);
+    }
+
+    function ddnsSecretPlaceholder(key) {
+      var inp = document.getElementById('ddns-' + key);
+      var info = s_ddns_secret[key];
+      inp.placeholder = s_ddns_clear[key] ? 'Will be cleared on Save'
+                      : (info.set ? 'Set (' + info.len + ' chars), leave empty to keep' : 'Not set');
+    }
+
+    function ddnsSyncVisibility() {
+      document.getElementById('ddns-body-wrap').style.display =
+        document.getElementById('ddns-method').value === 'GET' ? 'none' : '';
+      [1, 2, 3].forEach(function (i) {
+        document.getElementById('ddns-src' + i + '-url').style.display =
+          document.getElementById('ddns-src' + i).value === 'custom' ? '' : 'none';
+      });
+    }
+
+    function ddnsForceTick() {
+      var btn = document.getElementById('ddns-force');
+      if (s_ddns_force_left > 0) {
+        btn.disabled = true;
+        btn.textContent = 'Force update now (' + s_ddns_force_left + ' s)';
+        s_ddns_force_left--;
+        if (!s_ddns_force_timer) s_ddns_force_timer = setInterval(ddnsForceTick, 1000);
+      } else {
+        btn.disabled = false;
+        btn.textContent = 'Force update now';
+        if (s_ddns_force_timer) { clearInterval(s_ddns_force_timer); s_ddns_force_timer = null; }
+      }
+    }
+
+    function ddnsForceWait(sec) {
+      s_ddns_force_left = Math.max(0, Math.ceil(sec || 0));
+      ddnsForceTick();
+    }
+
+    function applyDdnsStatus(st) {
+      var cls = { ok: 'badge-success', disabled: 'badge-neutral', waiting: 'badge-info', cooldown: 'badge-warning' };
+      var badge = document.getElementById('ddns-badge');
+      badge.className = 'badge ' + (cls[st.state] || 'badge-danger');
+      badge.textContent = st.state || '—';
+      document.getElementById('ddns-st-state').textContent =
+        (st.state || '—') + (st.detail ? ' — ' + st.detail : '');
+      var srcs = st.sources || [];
+      [1, 2, 3].forEach(function (i) {
+        var x = srcs[i - 1] || {};
+        document.getElementById('ddns-st-src' + i).textContent =
+          !x.asked ? '—' : (x.ok ? x.ip : 'error: ' + (x.error || '?'));
+      });
+      document.getElementById('ddns-st-quorum').textContent = st.quorum_ip || '—';
+      document.getElementById('ddns-st-last-ok').textContent = st.last_ok_ip
+        ? st.last_ok_ip + (st.last_ok_age_s >= 0 ? ' · ' + ddnsDur(st.last_ok_age_s) + ' ago' : '') : '—';
+      document.getElementById('ddns-st-http').textContent =
+        (st.last_http ? String(st.last_http) : '') + (st.last_error ? (st.last_http ? ' · ' : '') + st.last_error : '') || '—';
+      document.getElementById('ddns-st-snippet').textContent = st.snippet || '—';
+      document.getElementById('ddns-st-next').textContent = st.state === 'disabled' ? '—'
+        : (st.next_check_s > 0 ? 'in ' + ddnsDur(st.next_check_s) : 'now');
+      document.getElementById('ddns-st-cooldown-row').style.display = st.cooldown_s > 0 ? '' : 'none';
+      document.getElementById('ddns-st-cooldown').textContent = ddnsDur(st.cooldown_s || 0);
+      ddnsForceWait(st.force_wait_s);
+    }
+
+    var s_ddns_status_pending = false;
+
+    function refreshDdnsStatus() {
+      var page = document.getElementById('page-ddns');
+      if (!page || !page.classList.contains('active') || s_ddns_status_pending) return;
+      if (document.getElementById('authSetup').style.display !== 'none' ||
+          document.getElementById('authLogin').style.display !== 'none') return;
+      s_ddns_status_pending = true;
+      apiFetch('/api/ddns')
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(function (d) { applyDdnsStatus(d.status || {}); })
+        .catch(function () {})
+        .finally(function () { s_ddns_status_pending = false; });
+    }
+
+    setInterval(refreshDdnsStatus, 5000);
+
+    function loadDdns() {
+      apiFetch('/api/ddns')
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(function (d) {
+          document.getElementById('ddns-enabled').checked = !!d.enabled;
+          document.getElementById('ddns-url').value = d.url || '';
+          document.getElementById('ddns-src-ip').checked = !!d.src_ip;
+          document.getElementById('ddns-method').value = d.method || 'GET';
+          document.getElementById('ddns-header').value = d.header || '';
+          document.getElementById('ddns-body').value = d.body || '';
+          document.getElementById('ddns-body-type').value = d.body_type || 'form';
+          document.getElementById('ddns-user').value = d.user || '';
+          ['pass', 'token'].forEach(function (k) {
+            var inp = document.getElementById('ddns-' + k);
+            inp.value = '';
+            inp.type = 'password';
+            s_ddns_clear[k] = false;
+            s_ddns_secret[k] = { set: !!d[k + '_set'], len: d[k + '_len'] || 0 };
+            ddnsSecretPlaceholder(k);
+          });
+          document.getElementById('ddns-match').value = d.match || '';
+          var srcs = d.sources || [];
+          [1, 2, 3].forEach(function (i) {
+            var x = srcs[i - 1] || {};
+            document.getElementById('ddns-src' + i).value = x.preset || 'ipify';
+            document.getElementById('ddns-src' + i + '-url').value = x.url || '';
+          });
+          document.getElementById('ddns-interval').value = d.interval_min || 5;
+          document.getElementById('ddns-wan').checked = !!d.wan_trigger;
+          document.getElementById('ddns-refresh').value = d.refresh_days || 0;
+          ddnsSyncVisibility();
+          applyDdnsStatus(d.status || {});
+          document.getElementById('ddns-save').disabled = true;
+        })
+        .catch(function () {});
+    }
+
+    (function () {
+      function markDirty() { document.getElementById('ddns-save').disabled = false; }
+      ['ddns-enabled', 'ddns-url', 'ddns-src-ip', 'ddns-method', 'ddns-header', 'ddns-body', 'ddns-body-type',
+       'ddns-user', 'ddns-pass', 'ddns-token', 'ddns-match', 'ddns-src1', 'ddns-src2', 'ddns-src3',
+       'ddns-src1-url', 'ddns-src2-url', 'ddns-src3-url', 'ddns-interval', 'ddns-wan', 'ddns-refresh'
+      ].forEach(function (id) {
+        var el = document.getElementById(id);
+        el.addEventListener('input', markDirty);
+        el.addEventListener('change', markDirty);
+      });
+      ['ddns-method', 'ddns-src1', 'ddns-src2', 'ddns-src3'].forEach(function (id) {
+        document.getElementById(id).addEventListener('change', ddnsSyncVisibility);
+      });
+      ['pass', 'token'].forEach(function (k) {
+        var inp = document.getElementById('ddns-' + k);
+        document.getElementById('ddns-' + k + '-show').addEventListener('click', function () {
+          inp.type = (inp.type === 'password') ? 'text' : 'password';
+        });
+        document.getElementById('ddns-' + k + '-clear').addEventListener('click', function () {
+          inp.value = '';
+          s_ddns_clear[k] = true;
+          ddnsSecretPlaceholder(k);
+          markDirty();
+        });
+        inp.addEventListener('input', function () {
+          if (inp.value && s_ddns_clear[k]) { s_ddns_clear[k] = false; ddnsSecretPlaceholder(k); }
+        });
+      });
+
+      document.getElementById('ddns-save').addEventListener('click', function () {
+        var body = {
+          enabled:      document.getElementById('ddns-enabled').checked,
+          url:          document.getElementById('ddns-url').value.trim(),
+          src_ip:       document.getElementById('ddns-src-ip').checked,
+          method:       document.getElementById('ddns-method').value,
+          header:       document.getElementById('ddns-header').value.trim(),
+          body:         document.getElementById('ddns-method').value === 'GET' ? '' : document.getElementById('ddns-body').value,
+          body_type:    document.getElementById('ddns-body-type').value,
+          user:         document.getElementById('ddns-user').value,
+          match:        document.getElementById('ddns-match').value,
+          sources:      [1, 2, 3].map(function (i) {
+            var preset = document.getElementById('ddns-src' + i).value;
+            return { preset: preset,
+                     url: preset === 'custom' ? document.getElementById('ddns-src' + i + '-url').value.trim() : '' };
+          }),
+          interval_min: Number.parseInt(document.getElementById('ddns-interval').value, 10) || 0,
+          wan_trigger:  document.getElementById('ddns-wan').checked,
+          refresh_days: Number.parseInt(document.getElementById('ddns-refresh').value, 10) || 0
+        };
+        ['pass', 'token'].forEach(function (k) {
+          var v = document.getElementById('ddns-' + k).value;
+          if (v) body[k] = v;                       /* omit-to-keep */
+          else if (s_ddns_clear[k]) body[k + '_clear'] = true;
+        });
+
+        var btn = this;
+        btn.disabled = true;
+        btn.textContent = 'Saving…';
+        apiFetch('/api/ddns', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify(body)
+        })
+          .then(function (r) {
+            return r.json().catch(function () { return {}; }).then(function (j) {
+              if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+              return j;
+            });
+          })
+          .then(function () {
+            btn.textContent = 'Save';
+            showToast('success', 'Saved', 'DDNS settings written to NVS.', 4000);
+            loadDdns();
+          })
+          .catch(function (e) {
+            btn.disabled = false;
+            btn.textContent = 'Save';
+            if (e && e.message === '401') return;
+            showToast('error', 'Save failed', e && e.message ? e.message : 'unknown error', 8000);
+          });
+      });
+
+      document.getElementById('ddns-force').addEventListener('click', function () {
+        var btn = this;
+        btn.disabled = true;
+        apiFetch('/api/ddns/force', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    '{}'
+        })
+          .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+          .then(function (j) {
+            if (j.queued) {
+              showToast('success', 'Update queued', 'The check runs in the background; the status below refreshes.', 4000);
+              ddnsForceWait(60);
+              setTimeout(refreshDdnsStatus, 5000);
+            } else {
+              ddnsForceWait(j.wait_s);
+            }
+          })
+          .catch(function (e) {
+            btn.disabled = false;
+            if (e && e.message === '401') return;
+            showToast('error', 'Force failed', e && e.message ? e.message : 'unknown error', 6000);
+          });
+      });
+    })();
 
     // =====================================================================
     // TOOLS PAGE — route explain / scan / log
