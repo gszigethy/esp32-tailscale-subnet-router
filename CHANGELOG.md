@@ -4,12 +4,17 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.38-beta5+W5500] - 2026-10-24
 
 ### Fork changes
 - Less idle traffic on the uplink (microlink fork `gszigethy/microlink`, proposed upstream): paths, heartbeats and keepalives are kept only toward tailnet peers with traffic in the last 45 s, plus the exit node and the priority peer; an idle peer goes through DERP until it is used again, and the packet that restarts its session is held, not dropped. The router sets no WireGuard keepalive and a 30 s control-plane PING (was 5 s); periodic STUN slows to 5 min while every peer is idle.
 - The W5500 board now advertises its Ethernet LAN address as a tailnet endpoint, so peers on the same LAN can connect directly.
 - DDNS checks every 15 minutes by default (was 5). An uplink address change still triggers a check at once; stored settings keep their interval.
+
+### Validation
+- Device (ESP32-S3, W5500 wired uplink, idle tailnet, 10 min): uplink out 70.9 → 6.8 KB/min, in 64.0 → 33.9 KB/min, tunnel ~50 B/min → 0. After more than 3 min idle the first ping to an idle peer gets a reply; a peer on the same LAN connects directly to the Ethernet address; the control connection stays up.
+- 246 DDNS core checks pass; the firmware builds against every microlink commit of the bump; CI build and static analysis pass.
+- Not yet confirmed on a device: OTA from the release asset, wired-to-Wi-Fi failover, and idle behaviour while the board uses an exit node (its ICMP keepalive still runs every 25 s).
 
 ## [0.1.38-beta4+W5500] - 2026-10-21
 
