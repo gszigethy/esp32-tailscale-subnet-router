@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fork changes
+- Less idle traffic on the uplink (microlink fork `gszigethy/microlink`, proposed upstream): paths, heartbeats and keepalives are kept only toward tailnet peers with traffic in the last 45 s, plus the exit node and the priority peer; an idle peer goes through DERP until it is used again, and the packet that restarts its session is held, not dropped. The router sets no WireGuard keepalive and a 30 s control-plane PING (was 5 s); periodic STUN slows to 5 min while every peer is idle.
+- The W5500 board now advertises its Ethernet LAN address as a tailnet endpoint, so peers on the same LAN can connect directly.
+- DDNS checks every 15 minutes by default (was 5). An uplink address change still triggers a check at once; stored settings keep their interval.
+
 ## [0.1.38-beta4+W5500] - 2026-10-21
 
 ### Fork changes

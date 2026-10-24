@@ -6545,7 +6545,7 @@
             document.getElementById('ddns-src' + i).value = x.preset || 'ipify';
             document.getElementById('ddns-src' + i + '-url').value = x.url || '';
           });
-          document.getElementById('ddns-interval').value = d.interval_min || 5;
+          document.getElementById('ddns-interval').value = d.interval_min || 15;
           document.getElementById('ddns-wan').checked = !!d.wan_trigger;
           document.getElementById('ddns-refresh').value = d.refresh_days || 0;
           ddnsSyncVisibility();

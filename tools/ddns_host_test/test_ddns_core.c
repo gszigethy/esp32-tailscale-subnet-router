@@ -121,7 +121,7 @@ static ddns_req_t s_req;
 static void test_cfg_defaults(void) {
     ddns_cfg_t c;
     ddns_cfg_defaults(&c);
-    CHECK(c.version == DDNS_CFG_VERSION && !c.enabled && c.wan_trigger && c.interval_min == 5 && c.refresh_days == 0);
+    CHECK(c.version == DDNS_CFG_VERSION && !c.enabled && c.wan_trigger && c.interval_min == 15 && c.refresh_days == 0);
     CHECK(c.method == DDNS_M_GET && c.body_type == DDNS_BODY_FORM);
     CHECK(strcmp(ddns_src_url(&c, 0), "https://api.ipify.org") == 0);
     CHECK(strcmp(ddns_src_url(&c, 1), "https://ipv4.icanhazip.com") == 0);

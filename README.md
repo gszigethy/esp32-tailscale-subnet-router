@@ -409,6 +409,9 @@ exit-node and subnet routing.
   [Csontikka/microlink](https://github.com/Csontikka/microlink) — itself
   based on the original [CamM2325/microlink](https://github.com/CamM2325/microlink) —
   attached here as a git submodule and pinned to the integration commit.
+  The submodule currently tracks the
+  [gszigethy/microlink](https://github.com/gszigethy/microlink) fork,
+  which carries changes not yet merged upstream.
   Its `docs/ARCHITECTURE.md` and `docs/TAILSCALE_REFERENCE.md` go deeper.
 
 See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for a field-by-field
