@@ -37,6 +37,11 @@ Everything is env-var driven so no IPs or credentials get committed.
 | `DK_SUBNET_TARGET` | a host inside the LAN advertised by `DK_HOST`              | `192.0.2.250`    |
 | `EXIT_NODE_IP`     | (optional) tailnet IP to use as exit node in stage B       | `100.x.x.x`      |
 | `TEST_QUICK`       | `1` skips the slow exit-node stage of the routing module   | `0`              |
+| `ESP_SNMP_COMMUNITY` | (optional) SNMP community for the `ddns` SNMP checks; read from `/api/snmp` when unset | `<community>` |
+| `PLAYWRIGHT_CDP`   | (optional) CDP endpoint of a running Chrome to use instead of launching one | `ws://192.0.2.20:3000/` |
+| `DDNS_LIVE`        | `1` runs the `ddns` checks that need the internet (httpbin, IP sources) | `0`   |
+| `DDNS_STA_CHURN`   | `1` runs the `ddns` Wi-Fi retry check (adds a test network, two reboots) | `0`  |
+| `DDNS_TEST_RESET_SECRETS` | `1` lets `ddns` checks overwrite a stored DDNS password/token | `0` |
 
 Drop those into a local `.env` (gitignored) and source it before running:
 
@@ -172,6 +177,35 @@ round-trip via `/api/*` — no Pi, no DK side-channel required.
 The reboot test is the only invasive one. Everything else is a same-
 session API round-trip with automatic restore.
 
+### `ddns` — Dynamic DNS client
+API and SNMP checks run by default and restore the original config:
+
+* **Defaults** — on an unconfigured device: disabled, sources ipify /
+  icanhazip / AWS, every 15 min, WAN trigger on, refresh 0.
+* **Secrets** — the token is write-only, a POST without it keeps it, and
+  `token_clear` empties it. Skipped when the device already has a stored
+  password or token (they can't be read back to restore), unless
+  `DDNS_TEST_RESET_SECRETS=1`.
+* **Validation** — 400 for an `http://` provider, a literal token in the
+  URL, two `http://` sources, interval 0, a body with GET and a private
+  custom source; 415 for form-encoded POSTs; Force is rate limited.
+* **Status and UI** — `/api/status` has a `ddns` object and the SPA has
+  the DDNS tab.
+* **SNMP** — the 13 NET-SNMP-EXTEND-MIB rows for index `"ddns"` in
+  order, `nsExtendNumEntries = 1`, `nsExtendResult` in 0..6, and the walk
+  continues past the table. Skipped when SNMP is off.
+
+With `DDNS_LIVE=1`, against httpbin.org and the real IP sources: quorum
+agrees on a public IP, all three sources are asked and shown, the URL never
+appears in the status or over SNMP, the quorum ignores the exit node (needs
+`EXIT_NODE_IP` and the test Pi), redirects are not followed, a 401 stops
+updates and the stop survives a reboot without a provider call, saving
+leaves `stopped`, and Force lifts a stored stop across a reboot. With
+`DDNS_STA_CHURN=1` as well, a retrying absent Wi-Fi network must not block
+an update.
+
+The live checks reboot the device several times.
+
 ### `routing` — the 4×2 scenario matrix
 The headline test. Runs every direction twice (once with no exit
 node configured on the ESP, once with one). The directions are:
@@ -227,6 +261,29 @@ The original `exit_node_ip` is always restored at the end.
 * **Routing matrix leaves a bad `exit_node_ip` behind on crash** —
   the runner restores it in a `finally:`, but if the runner is killed
   hard, manually `POST /api/tailscale {"settings":{"exit_node_ip":""}}`.
+
+## DDNS host regressions
+
+These checks do not contact a device or external network:
+
+```bash
+make -C tools/ddns_host_test test
+python3 tools/test_ddns_http.py
+node tools/test_ddns_ui.cjs
+```
+
+The HTTP test requires the ESP-IDF package installed by `pio run -e esp32-s3`.
+It runs the production transport and ESP-IDF HTTP parser with deterministic
+DNS/TLS fakes under AddressSanitizer and UBSan: deadline expiry during DNS,
+connection, partial writes, trickled headers and stalled bodies; late DNS
+completion; ESP-IDF's destructive `select` timeout and plain-TCP `EINPROGRESS`
+while connecting; shared DNS/TCP/TLS/body deadlines; chunked and close-delimited
+answers; custom headers and the
+public-address policy. The browser regression runs the actual DDNS script
+with a small DOM and fake timers to check that Force and periodic status
+refresh preserve edits, secrets and Save state, avoid overlapping polls,
+and skip hidden or unauthenticated pages. These checks complement firmware
+build/static analysis and do not establish live TLS or device behavior.
 
 ## Adding a test
 

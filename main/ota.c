@@ -7,6 +7,8 @@
 #include <ctype.h>
 #include <time.h>
 
+#include <stdatomic.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -51,6 +53,8 @@ static volatile bool     s_update_available = false;
 static char              s_last_version[32]   = {0};
 static char              s_last_status[64]    = {0};
 
+static atomic_bool s_busy = false; /* see ota_is_busy() */
+
 static TaskHandle_t      s_poll_task   = NULL;
 static SemaphoreHandle_t s_poll_wake   = NULL;
 /* Recursive — `ota_poll_now` takes it around poll_once(), and poll_once()
@@ -79,8 +83,7 @@ static void set_status(const char *fmt, ...)
 
 /* ===== manual upload via /api/system/ota ===== */
 
-esp_err_t ota_upload_handler(httpd_req_t *req)
-{
+static esp_err_t upload_handler_impl(httpd_req_t *req) {
     if (req->content_len <= 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty body");
         return ESP_FAIL;
@@ -142,6 +145,15 @@ esp_err_t ota_upload_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true,\"reboot_required\":true}");
 }
+
+esp_err_t ota_upload_handler(httpd_req_t *req) {
+    atomic_store(&s_busy, true);
+    esp_err_t err = upload_handler_impl(req);
+    atomic_store(&s_busy, false);
+    return err;
+}
+
+bool ota_is_busy(void) { return atomic_load(&s_busy); }
 
 /* ===== GitHub Releases polling ===== */
 
@@ -433,8 +445,10 @@ static void do_install(void)
     }
     ESP_LOGW(TAG, "applying OTA: %s ← %s", tag, url);
     set_status("installing %s …", tag);
+    atomic_store(&s_busy, true);
     esp_err_t err = do_https_ota(url);
     if (err != ESP_OK) {
+        atomic_store(&s_busy, false);
         set_status("ota failed: %s", esp_err_to_name(err));
         return;
     }

@@ -147,6 +147,12 @@ traffic you route through it.)*
   live traffic counters — the Tailscale tunnel included),
   HOST-RESOURCES-MIB for per-core CPU load and memory, and
   ENTITY-SENSOR-MIB for the die temperature.
+- **Dynamic DNS** — keeps one DNS name on the router's public IPv4, off by
+  default. Three HTTPS "what is my IP" services must agree (two of three)
+  before anything is sent; any provider that takes one HTTPS request works
+  through a URL / header / body template, with write-only secrets. Status on
+  its own tab, the Status page and over SNMP. See
+  [DDNS](docs/CONFIGURATION.md#ddns).
 - **Operations toolbox** — on-device ping / traceroute / route-explain,
   a 1 MB download/upload speed test, live WiFi scan, and a
   microSD "flight recorder" for catching control-plane stalls.
@@ -330,7 +336,7 @@ subnet, and those devices can use the tailnet (and any exit node you picked).
 
 ## Web UI tour
 
-The single-page UI has six sections:
+The single-page UI has seven sections:
 
 | Section | What's there |
 |---|---|
@@ -338,6 +344,7 @@ The single-page UI has six sections:
 | **Network** | Uplink networks, AP (SSID/IP/DNS), DHCP reservations & leases, MAC denylist, port forwarding |
 | **Tailscale** | Auth key, hostname, advertised routes, exit node, MTU, peer table |
 | **Firewall** | The four ACL chains, rule editor, hit counters |
+| **DDNS** | Dynamic DNS provider settings, IP sources, live status, Force update |
 | **Diagnostics** | Route-explain, ping, traceroute, speed test, WiFi scan, live + SD logs |
 | **System** | Device name, firmware/OTA, SD-card logging, backup, danger zone, About (telemetry toggle) |
 
@@ -402,6 +409,9 @@ exit-node and subnet routing.
   [Csontikka/microlink](https://github.com/Csontikka/microlink) — itself
   based on the original [CamM2325/microlink](https://github.com/CamM2325/microlink) —
   attached here as a git submodule and pinned to the integration commit.
+  The submodule currently tracks the
+  [gszigethy/microlink](https://github.com/gszigethy/microlink) fork,
+  which carries changes not yet merged upstream.
   Its `docs/ARCHITECTURE.md` and `docs/TAILSCALE_REFERENCE.md` go deeper.
 
 See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for a field-by-field

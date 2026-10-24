@@ -395,6 +395,14 @@ static esp_err_t tailscale_connect_locked(void)
         .disco_heartbeat_ms = 0,
         .stun_interval_ms = 0,
         .ctrl_watchdog_ms = 0,
+        /* Idle traffic (metered uplinks): microlink already keeps paths
+         * and the WG keepalive only toward peers with traffic, plus the
+         * exit node and the priority peer. Their DISCO heartbeat keeps the
+         * NAT mapping, so the keepalive goes too, as in tailscaled. The
+         * server sends a keepalive about once a minute; with a 30 s PING a
+         * healthy connection still feeds the 120 s watchdog with margin. */
+        .wg_keepalive_s = -1,
+        .ctrl_ping_interval_ms = 30000,
         .ctrl_host = (tailscale_login_server && tailscale_login_server[0]) ? tailscale_login_server : NULL,
         .ipn_version = ipn_version_effective(),
         .advertise_routes = tailscale_compose_routes(), /* W5500 fork: + ETH/STA auto-routes */
