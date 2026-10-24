@@ -176,7 +176,7 @@ def check_get_defaults(results: list[Result], cfg: dict) -> None:
     srcs = [x.get("preset") for x in cfg.get("sources", [])]
     check(results, MODULE_ID, "GET /api/ddns defaults",
           cfg.get("enabled") is False and srcs == ["ipify", "icanhazip", "aws"]
-          and cfg.get("interval_min") == 5 and cfg.get("wan_trigger") is True
+          and cfg.get("interval_min") == 15 and cfg.get("wan_trigger") is True
           and cfg.get("refresh_days") == 0 and "status" in cfg,
           f"enabled={cfg.get('enabled')} sources={srcs} interval={cfg.get('interval_min')} "
           f"wan={cfg.get('wan_trigger')} refresh={cfg.get('refresh_days')}")

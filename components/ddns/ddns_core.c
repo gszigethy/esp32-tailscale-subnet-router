@@ -125,7 +125,7 @@ void ddns_cfg_defaults(ddns_cfg_t *c) {
     c->version = DDNS_CFG_VERSION;
     c->method = DDNS_M_GET;
     c->body_type = DDNS_BODY_FORM;
-    c->interval_min = 5;
+    c->interval_min = 15;
     c->wan_trigger = true;
     c->src[0].kind = DDNS_SRC_IPIFY;
     c->src[1].kind = DDNS_SRC_ICANHAZIP;

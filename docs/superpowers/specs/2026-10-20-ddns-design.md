@@ -389,7 +389,7 @@ a reboot. A separate small key, `ddns_stop`, holds the stopped reason.
 | token | 128 | write-only |
 | success match | 64 | `\|`-separated alternatives |
 | sources 1–3 | enum + custom URL (128 each) | |
-| interval | 1–1440 min | default 5 |
+| interval | 1–1440 min | default 15 (5 until 2026-10-24, raised to cut idle traffic) |
 | WAN trigger | bool | default on |
 | refresh | 0–365 days | default 0 (off) |
 

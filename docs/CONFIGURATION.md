@@ -205,7 +205,7 @@ tab; changes apply on Save, no restart.
 | **Token** | Available as `{token}`. |
 | **Success if response contains** | `|`-separated alternatives, case-sensitive substrings; a leading `^` anchors to the start of the trimmed answer. Empty = any 2xx counts. Examples: `^good|^nochg` (dyndns2), `OK` (DuckDNS), `<ErrCount>0</ErrCount>` (Namecheap). For JSON APIs that report errors with the HTTP status, leave it empty. |
 | **IP source 1–3** | Each slot picks a different source: api.ipify.org, ipv4.icanhazip.com, checkip.amazonaws.com, ifconfig.me, or a Custom URL. Defaults: ipify, icanhazip, AWS. At most one source may be plain `http://`. |
-| **Check every N min** | 1–1440, default 5. |
+| **Check every N min** | 1–1440, default 15. With the WAN trigger on, an uplink change is caught at once; the periodic check only covers a change behind the router, so a longer interval mostly saves traffic. |
 | **Also when WAN gets an IP** | Default on: an uplink gaining or losing an address (including failover) schedules a check about 10 s later. |
 | **Refresh every N days** | Re-sends an unchanged address after N days, 0 (default) = never. |
 

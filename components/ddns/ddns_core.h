@@ -51,7 +51,7 @@ typedef struct {
     } src[3];
 } ddns_cfg_t;
 
-/* Disabled, GET, form, every 5 min, WAN trigger on, no refresh, sources ipify/icanhazip/AWS. */
+/* Disabled, GET, form, every 15 min, WAN trigger on, no refresh, sources ipify/icanhazip/AWS. */
 void ddns_cfg_defaults(ddns_cfg_t *c);
 
 /* The preset URL for a slot, or its custom URL. */

@@ -181,7 +181,7 @@ session API round-trip with automatic restore.
 API and SNMP checks run by default and restore the original config:
 
 * **Defaults** — on an unconfigured device: disabled, sources ipify /
-  icanhazip / AWS, every 5 min, WAN trigger on, refresh 0.
+  icanhazip / AWS, every 15 min, WAN trigger on, refresh 0.
 * **Secrets** — the token is write-only, a POST without it keeps it, and
   `token_clear` empties it. Skipped when the device already has a stored
   password or token (they can't be read back to restore), unless

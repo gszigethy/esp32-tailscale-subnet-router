@@ -252,7 +252,7 @@ static void run_check(void) {
         }
     }
     bool enabled = s_cfg->enabled;
-    int64_t interval_us = (int64_t)(s_cfg->interval_min ? s_cfg->interval_min : 5) * 60 * US_PER_S;
+    int64_t interval_us = (int64_t)(s_cfg->interval_min ? s_cfg->interval_min : 15) * 60 * US_PER_S;
     uint32_t gen0 = s_gen;
     if (enabled) {
         cfg = heap_caps_calloc(1, sizeof *cfg, MALLOC_CAP_SPIRAM);
