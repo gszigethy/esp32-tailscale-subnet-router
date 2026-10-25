@@ -2735,7 +2735,7 @@ static esp_err_t tailscale_handler(httpd_req_t *req)
         cJSON_AddNumberToObject(settings, "peerapi_port", TAILSCALE_PEERAPI_PORT);
     }
     {
-        const char *eff = tailscale_compose_routes();
+        const char *eff = tailscale_advertise_routes_effective();
         cJSON_AddStringToObject(settings, "effective_routes", eff ? eff : "");
     }
     {
