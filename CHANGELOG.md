@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.39+W5500] - 2026-11-18
+
+### Released
+- Promotes v0.1.39-beta1+W5500 to the stable channel. Firmware behavior matches the beta; only the release version and documentation change.
+- First stable release since 0.1.35+W5500. It also brings the fork changes from 0.1.38-beta1 to beta6 to stable devices: the DDNS client (off by default), less idle uplink traffic, the Ethernet LAN address as a tailnet endpoint, and the AP-subnet hint fix.
+
 ## [0.1.39-beta1+W5500] - 2026-11-18
 
 ### Fork changes
