@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.39-beta1+W5500] - 2026-11-18
+
+### Fork changes
+- Based on upstream v0.1.39: WireGuard handshakes and keepalives are sent from the TCPIP thread, and a direct endpoint that stopped delivering is given up after 30 s (see the 0.1.39 entry below).
+- microlink fork (`gszigethy/microlink` 7914e68) merges upstream 6f92800 on top of the idle-traffic changes. The new 30 s re-check of a kept direct endpoint follows the idle rule: an idle peer is only parked on DERP, with no handshake and no ping.
+
+### Validation
+- Firmware builds. Not yet confirmed on a device: OTA from the release asset, wired uplink, tunnel, and an uplink roam.
+
 ## [0.1.38-beta6+W5500] - 2026-10-25
 
 ### Fork changes
@@ -110,6 +119,14 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Validation
 - Prerelease; device confirmation of OTA, wired uplink, tunnel, and exit-node hosting is required before stable promotion.
+
+## [0.1.39] — 2026-11-17
+
+Two fixes in microlink. A 0.1.38 router in the field rebooted inside lwIP's ARP table: the WireGuard manager task was sending handshakes and keepalives on the raw UDP socket itself, next to the TCPIP thread; those packets are now sent from the TCPIP thread. And a direct endpoint that stopped delivering is given up after 30 s instead of being kept for as long as the peer's packets arrive through the relay (aviadra's fix from esphome-tailscale). Device-tested before tagging on the WiFi-only reference router: manual OTA; a 4-minute tunnel soak through rekeys; a reboot; a dead-peer re-handshake with the exit node's tailscaled frozen for 40 s; six forced uplink roams with the heap flat; an official client using the router as exit node; using an exit node from an AP client; 7.6 days of uptime on the candidate build without a reset.
+
+### Fixed
+- **WireGuard handshakes and keepalives are sent from the TCPIP thread** (microlink). The data path and the WireGuard timer already ran there, but the WireGuard manager task also sent packets on the raw UDP socket itself: handshake initiations started by a path decision, handshake responses, cookie replies and the keepalive after a handshake. This firmware runs lwIP without core locking, so that was a second thread inside lwIP's ARP table; a 0.1.38 router in the field rebooted there (`free_etharp_q` under `etharp_query`). Packets sent off the TCPIP thread are now handed over to it as a private copy. The data path is unchanged.
+- **A direct endpoint that stopped delivering is given up after 30 s** (microlink, wireguard-lwip; ported from aviadra's fix in esphome-tailscale). The check that keeps a direct endpoint "while data is flowing" looked at the last authenticated packet from the peer on any path, so a peer whose packets only arrived through the relay kept an endpoint alive that delivered nothing, and the router's packets to it were lost for as long as the peer kept talking. The WireGuard layer now records the last authenticated packet that came from a real UDP source; the check reads that, re-checks a kept endpoint on every tick, and moves the peer back to the relay after 30 s without one. The `[WG_SNAP]` log line carries `lastrx_direct`.
 
 ## [0.1.38] — 2026-10-20
 
