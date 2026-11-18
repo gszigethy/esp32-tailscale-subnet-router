@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.39-beta1+W5500] - 2026-11-18
+
+### Fork changes
+- Based on upstream v0.1.39: WireGuard handshakes and keepalives are sent from the TCPIP thread, and a direct endpoint that stopped delivering is given up after 30 s (see the 0.1.39 entry below).
+- microlink fork (`gszigethy/microlink` 7914e68) merges upstream 6f92800 on top of the idle-traffic changes. The new 30 s re-check of a kept direct endpoint follows the idle rule: an idle peer is only parked on DERP, with no handshake and no ping.
+
+### Validation
+- Firmware builds. Not yet confirmed on a device: OTA from the release asset, wired uplink, tunnel, and an uplink roam.
+
 ## [0.1.38-beta6+W5500] - 2026-10-25
 
 ### Fork changes
