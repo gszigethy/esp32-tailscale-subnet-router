@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.41+W5500] - 2026-11-26
+
+### Fork changes
+- Based on upstream v0.1.41 and v0.1.40 (see their entries below): the tunnel comes up about 20 s sooner after a boot or an uplink change, relay reconnects resume the TLS session, an unchanged relay map is not measured again, a peer's tailnet address is refused as its WireGuard endpoint, a cookie reply no longer moves an endpoint, the WireGuard link flag is set on the TCPIP thread, STUN, relay and key-expiry input is checked, and the idle log is much shorter.
+- microlink fork (`gszigethy/microlink` 86cf0ef) merges upstream 15c6e6a on top of the idle-traffic changes. The merge was clean; the Ethernet uplink address used for endpoints and the netcheck bind is unchanged.
+- Released straight to the stable channel, without a beta.
+
+### Validation
+- Firmware builds. Not yet confirmed on a device: OTA from the release asset, wired uplink, tunnel, and an uplink roam.
+
 ## [0.1.39+W5500] - 2026-11-18
 
 ### Released
@@ -125,6 +135,30 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Validation
 - Prerelease; device confirmation of OTA, wired uplink, tunnel, and exit-node hosting is required before stable promotion.
+
+## [0.1.41] — 2026-11-25
+
+Connect-time work in microlink. The relay latency check that runs before the map stream no longer waits on a relay region that never answers, so the tunnel is up about 20 s sooner after a boot or an uplink change; a relay map that arrives again unchanged is not measured again; a relay reconnect resumes the TLS session instead of a full handshake; and the peer cache in flash is written only when a peer changes. Device-tested before tagging on the WiFi-only reference router: manual OTA; a 4-minute tunnel soak through rekeys; a reboot; a dead-peer re-handshake with the exit node's tailscaled frozen for 40 s; six forced uplink roams with the heap flat; three control and relay reconnects with the instance kept; an official client using the router as exit node; using an exit node from an AP client, A-B-A-B against 0.1.40. Not covered by a device test: the single-region shortcut, a saved TLS session offered to a relay with a different certificate, and the flash write counts.
+
+### Changed
+- **The tunnel is up about 20 s sooner after a boot or an uplink change** (microlink). The relay latency check runs before the map stream starts, and it waited on every region: one relay region that never answers held the second measuring round back for 5 s and then the exit until the deadline, with the map stream waiting: 12 s or more on the reference router after every connect. A probe that has been out for 2 s is no longer waited for, and the budget when nothing answers at all is 10 s instead of 25 s. Measured on the reference router: first tunnel reply about 24 s after boot over five reboots, 40-50 s before.
+- **An unchanged relay map is not measured again** (microlink; ported from esphome-tailscale). The control plane sends the relay map again on the stream right after the initial one, and on every reconnect; each copy started a new latency sweep that held the map stream. The same map within 30 minutes now reuses the last result, and a map with a single region skips the measurement. Netmap handling after a control reconnect: 0.6 s instead of 6.6 s.
+- **Relay reconnects resume the TLS session** (microlink; ported from esphome-tailscale). The session of a successful relay connection is kept and offered on the next connect to the same relay name; a relay that cannot resume it gets a full handshake with the certificate check. TLS handshake on a reconnect: 28-48 ms instead of about 1.8 s.
+- **The peer cache in flash is written only when a peer changes** (microlink; found in upstream microlink). Every peer of every netmap rewrote the whole cache blob.
+
+## [0.1.40] — 2026-11-24
+
+Hardening in microlink, from a review of the fork against esphome-tailscale's vendored copy and upstream microlink 2.3.0. A peer's tailnet address can no longer become its WireGuard endpoint (with the default routing that looped the packet back into the tunnel until the stack overflowed), a cookie reply no longer moves an endpoint, the WireGuard interface's link flag is set on the TCPIP thread, and STUN, relay and key-expiry input is checked. The idle log at the default level is about a tenth of what it was. Device-tested before tagging on the WiFi-only reference router: manual OTA; a 4-minute tunnel soak through rekeys; a reboot; a dead-peer re-handshake with the exit node's tailscaled frozen for 40 s; six forced uplink roams with the heap flat; an official client using the router as exit node; using an exit node from an AP client. The refusal of a tailnet endpoint itself is not covered by a device test.
+
+### Fixed
+- **A tailnet address is refused as a peer's endpoint** (microlink, wireguard-lwip). An authenticated WireGuard packet moved the peer's endpoint to whatever address it came from. The WireGuard socket listens on every interface, so a tailnet peer can reach it through the tunnel; the packet then arrives from the peer's tailnet address, and that became its endpoint. The output socket is only pinned to the uplink while an exit node is in use, so with the default routing every packet to that peer went back into the WireGuard interface and was encrypted for the same peer again, until the stack overflowed. Unspecified, loopback, link-local, multicast and broadcast addresses, the router's own tunnel address and any peer's tailnet address are now refused on the receive path, in the endpoint setter, in the CallMeMaybe candidates and as a DISCO pong source. The rest of 100.64.0.0/10 stays allowed, because an uplink can live there (Starlink, LTE routers, carrier NAT). Found in upstream microlink.
+- **A cookie reply no longer moves a peer's endpoint** (microlink, wireguard-lwip). A cookie reply proves no session; as in wireguard-go, only an authenticated initiation, response or transport packet updates the endpoint. Found in upstream microlink.
+- **The WireGuard interface's link flag is set on the TCPIP thread** (microlink, wireguard-lwip). The link went up or down on whichever task finished a handshake or found every peer down, usually the WireGuard manager task, while the TCPIP thread reads and writes the same interface flags; this firmware runs lwIP without core locking. Same class as the 0.1.39 ARP-table fix. Ported from esphome-tailscale.
+- **The DERP TLS contexts are freed before they are initialised again** (microlink). A relay connect that failed late, or a session torn down without the regular disconnect, left TLS buffers orphaned and a half-initialised context for the next handshake. Ported from esphome-tailscale.
+- **Input checks on STUN, the relay and the key expiry** (microlink; found in upstream microlink). A STUN response is accepted only while a request is outstanding (after a successful probe any response could rewrite the advertised endpoint). A relay packet too short to carry a source key is dropped. The relay upgrade is accepted on a `101` status line, not on "101" anywhere in the headers. The key-expiry fields are range-checked, and a key without expiry reads as 0 instead of a negative time.
+
+### Changed
+- **The idle log is about a tenth of what it was** (microlink). The relay heartbeat was still a temporary WARN every 2 s and the relay status line a WARN every 10 s; both are INFO once a minute. The steps of a handshake that completes are INFO. Failures and session resets stay at WARN, so the SD recorder keeps them at its default level. A DISCO message that is not sealed for this node is logged once a minute with a count. At the default level an idle router writes about 3 lines a minute instead of about 36.
 
 ## [0.1.39] — 2026-11-17
 
