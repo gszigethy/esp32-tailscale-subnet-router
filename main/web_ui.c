@@ -3619,16 +3619,18 @@ static const httpd_uri_t uri_system_debug_wg_tx_post = {
  * while the tunnel instance stays up (microlink_rebind), unlike /api/debug/ts-reconnect,
  * which stops and restarts everything. Exercises what a dropped control or relay
  * connection exercises in the field. */
-static esp_err_t system_debug_ts_rebind_handler(httpd_req_t *req)
-{
-    if (require_auth(req) != ESP_OK) return ESP_FAIL;
+static esp_err_t system_debug_ts_rebind_handler(httpd_req_t *req) {
+    if (require_auth(req) != ESP_OK)
+        return ESP_FAIL;
     struct microlink_s *mlh = tailscale_get_microlink();
     esp_err_t err = mlh ? microlink_rebind(mlh) : ESP_ERR_INVALID_STATE;
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, err == ESP_OK ? "{\"ok\":true}" : "{\"ok\":false}");
 }
 static const httpd_uri_t uri_system_debug_ts_rebind = {
-    .uri = "/api/debug/ts-rebind", .method = HTTP_POST, .handler = system_debug_ts_rebind_handler,
+    .uri = "/api/debug/ts-rebind",
+    .method = HTTP_POST,
+    .handler = system_debug_ts_rebind_handler,
 };
 
 static const httpd_uri_t uri_system_debug_radio_post = {
