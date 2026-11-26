@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.41+W5500] - 2026-11-26
+
+### Fork changes
+- Based on upstream v0.1.41 and v0.1.40 (see their entries below): the tunnel comes up about 20 s sooner after a boot or an uplink change, relay reconnects resume the TLS session, an unchanged relay map is not measured again, a peer's tailnet address is refused as its WireGuard endpoint, a cookie reply no longer moves an endpoint, the WireGuard link flag is set on the TCPIP thread, STUN, relay and key-expiry input is checked, and the idle log is much shorter.
+- microlink fork (`gszigethy/microlink` 86cf0ef) merges upstream 15c6e6a on top of the idle-traffic changes. The merge was clean; the Ethernet uplink address used for endpoints and the netcheck bind is unchanged.
+- Released straight to the stable channel, without a beta.
+
+### Validation
+- Firmware builds. Not yet confirmed on a device: OTA from the release asset, wired uplink, tunnel, and an uplink roam.
+
 ## [0.1.39+W5500] - 2026-11-18
 
 ### Released
